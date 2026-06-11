@@ -2,7 +2,7 @@
 
 A small original companion game for an Arduino Mega 2560 with a 1.54-inch
 e-paper screen. It has
-an animated egg and hatch sequence, three original animal designs, care
+an animated egg and hatch sequence, ten original animal designs, care
 activities, music, two minigames, a clock/date setup, and EEPROM saves.
 
 At startup, choose English, Bulgarian, or German. The selected language is
@@ -95,9 +95,10 @@ Use `3.3V` unless your particular module explicitly states that it accepts
 
 ## First Start
 
-Set the time, set the date, and choose a cat, dog, or bunny. An egg then
-appears and hatches after a random **2 to 5 hours** while the Mega is powered.
-The egg periodically changes pose, followed by an animated musical hatch.
+Set the time, set the date, and choose a cat, dog, bunny, panda, dragon, fox,
+chicken, pig, hamster, or penguin. An egg then appears and hatches after a
+random **2 to 5 hours** while the Mega is powered. The egg periodically changes
+pose, followed by an animated musical hatch.
 
 ## Home Screen
 
@@ -118,7 +119,13 @@ All care-action icons are visible together in the two-row footer. Only the
 selected action has a border. Press **Left and Right together** from Home to
 open Options for clock, date, or a new companion.
 
-Each care action has its own short e-paper animation and buzzer sound.
+Each care action has its own short e-paper animation and buzzer sound. Every
+animal has idle, blink, eating, happy, and sleeping artwork. The cat also uses
+larger hand-drawn action scenes. The other animals use full feeding scenes
+with species-specific food: bone, carrot, bamboo, meat, grain, apple, seeds,
+or fish. They also have full drinking scenes with species-sized bowls and
+details such as the dragon's stone basin and penguin's ice-rimmed dish. Their
+remaining care scenes use individual motion accents and clean shared props.
 
 ## Clock Limitation
 
@@ -148,8 +155,9 @@ This shortcut is compiled only into the Wokwi simulation firmware.
 (Mega pins D20/SDA, D21/SCL). The RTC keeps simulation time moving while
 the project is paused or restarted in Wokwi.
 
-The original kawaii animal concept sheet used as a drawing reference is saved
-at `assets/kawaii-companion-concepts.png`.
+The original kawaii animal concept sheets used as drawing references are saved
+under `assets/kawaii-*-companions.png`. Generated 1-bit previews are under
+`assets/bitmap-previews`.
 
 ## Different 1.54-Inch Panels
 

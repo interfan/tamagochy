@@ -6,10 +6,15 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "assets" / "kawaii-companion-concepts.png"
 NEW_COMPANIONS_SOURCE = ROOT / "assets" / "kawaii-new-companions.png"
+FINAL_COMPANIONS_SOURCE = ROOT / "assets" / "kawaii-final-companions.png"
 EGG_SOURCE = ROOT / "assets" / "kawaii-egg-concept.png"
 OUTPUT = ROOT / "companion_bitmaps.h"
 PREVIEW_DIR = ROOT / "assets" / "bitmap-previews"
 ACTION_SCENE_DIR = ROOT / "assets" / "action-scenes"
+SPECIES_FEED_COMPANIONS_SOURCE = ACTION_SCENE_DIR / "species-feed-companions.png"
+SPECIES_FEED_SPECIAL_SOURCE = ACTION_SCENE_DIR / "species-feed-dragon-fox-penguin.png"
+SPECIES_WATER_COMPANIONS_SOURCE = ACTION_SCENE_DIR / "species-water-companions.png"
+SPECIES_WATER_SPECIAL_SOURCE = ACTION_SCENE_DIR / "species-water-dragon-fox-penguin.png"
 ACTION_SCENES = (
     "feed", "water", "sleep", "overnight", "clean",
     "medicine", "learn", "pet", "groom", "wash",
@@ -31,25 +36,43 @@ SPECS = {
 NEW_COMPANION_SPECS = {
     "panda": {
         "crop": (20, 135, 390, 650), "width": 96, "height": 100, "threshold": 165,
-        "eyes": [(40, 42), (57, 42)], "mouth": (49, 56),
+        "eyes": [(39, 44), (57, 44)], "eye_radius": 6, "mouth": (49, 56),
     },
     "dragon": {
         "crop": (390, 120, 810, 650), "width": 96, "height": 100, "threshold": 165,
-        "eyes": [(40, 42), (57, 42)], "mouth": (49, 55),
+        "eyes": [(41, 46), (56, 46)], "eye_radius": 6, "mouth": (49, 55),
     },
     "fox": {
         "crop": (805, 115, 1210, 650), "width": 96, "height": 100, "threshold": 165,
-        "eyes": [(40, 43), (57, 43)], "mouth": (49, 56),
+        "eyes": [(41, 48), (56, 48)], "eye_radius": 6, "mouth": (49, 57),
     },
     "chicken": {
         "crop": (1210, 135, 1570, 650), "width": 96, "height": 100, "threshold": 165,
-        "eyes": [(40, 43), (57, 43)], "mouth": (49, 57),
+        "eyes": [(42, 46), (56, 46)], "eye_radius": 6, "mouth": (49, 57),
     },
     "pig": {
         "crop": (1570, 145, 1950, 650), "width": 96, "height": 100, "threshold": 165,
-        "eyes": [(39, 43), (58, 43)], "mouth": (49, 61),
+        "eyes": [(41, 48), (57, 48)], "eye_radius": 6, "mouth": (49, 58),
     },
 }
+FINAL_COMPANION_SPECS = {
+    "hamster": {
+        "crop": (230, 75, 845, 805), "width": 96, "height": 100, "threshold": 165,
+        "eyes": [(39, 45), (58, 45)], "eye_radius": 6, "mouth": (49, 57),
+    },
+    "penguin": {
+        "crop": (930, 75, 1540, 805), "width": 96, "height": 100, "threshold": 165,
+        "eyes": [(39, 43), (58, 43)], "eye_radius": 6, "mouth": (49, 55),
+    },
+}
+SPECIES_FEED_SHEETS = (
+    (SPECIES_FEED_COMPANIONS_SOURCE, ("dog", "bunny", "panda", "chicken", "pig", "hamster")),
+    (SPECIES_FEED_SPECIAL_SOURCE, ("dragon", "fox", "penguin")),
+)
+SPECIES_WATER_SHEETS = (
+    (SPECIES_WATER_COMPANIONS_SOURCE, ("dog", "bunny", "panda", "chicken", "pig", "hamster")),
+    (SPECIES_WATER_SPECIAL_SOURCE, ("dragon", "fox", "penguin")),
+)
 
 
 def prepare_bitmap(image: Image.Image, spec: dict) -> Image.Image:
@@ -80,6 +103,41 @@ def encode_bitmap(image: Image.Image, width: int, height: int) -> list[int]:
                     value |= 0x80 >> bit
             values.append(value)
     return values
+
+
+def encode_spans(image: Image.Image) -> list[int]:
+    values = []
+    pixels = image.load()
+    for y in range(image.height):
+        x = 0
+        while x < image.width:
+            while x < image.width and pixels[x, y] != 0:
+                x += 1
+            if x >= image.width:
+                break
+            start = x
+            while x < image.width and pixels[x, y] == 0:
+                x += 1
+            values.extend((start, x - start))
+        values.append(255)
+    return values
+
+
+def validate_spans(image: Image.Image, spans: list[int]) -> None:
+    decoded = Image.new("L", image.size, 255)
+    draw = ImageDraw.Draw(decoded)
+    index = 0
+    for y in range(image.height):
+        while True:
+            start = spans[index]
+            index += 1
+            if start == 255:
+                break
+            length = spans[index]
+            index += 1
+            draw.line((start, y, start + length - 1, y), fill=0)
+    if decoded.tobytes() != image.tobytes():
+        raise ValueError("Span round-trip validation failed")
 
 
 def connected_components(image: Image.Image) -> list[tuple[int, int, int, int, int, int]]:
@@ -169,6 +227,37 @@ def prepare_action_frames(
     return prepared
 
 
+def prepare_grid_action_frames(image: Image.Image, row: int, row_count: int) -> list[Image.Image]:
+    source = ImageOps.autocontrast(image.convert("L"))
+    components = connected_components(source)
+    cell_width = source.width / 4
+    cell_height = source.height / row_count
+    prepared = []
+    for column in range(4):
+        part = Image.new("L", source.size, 255)
+        for min_x, min_y, max_x, max_y, center_x, count in components:
+            center_y = (min_y + max_y) // 2
+            if (column * cell_width <= center_x < (column + 1) * cell_width and
+                    row * cell_height <= center_y < (row + 1) * cell_height and count >= 4):
+                part.paste(source.crop((min_x, min_y, max_x, max_y)), (min_x, min_y))
+        ink = part.point(lambda value: 0 if value < 225 else 255)
+        bbox = ImageOps.invert(ink).getbbox()
+        part = part.crop(bbox) if bbox else part
+        scale = min(178 / part.width, 102 / part.height)
+        resized = part.resize(
+            (max(1, round(part.width * scale)), max(1, round(part.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+        resized = ImageOps.autocontrast(resized)
+        resized = ImageEnhance.Contrast(resized).enhance(1.8)
+        frame = Image.new("L", (184, 108), 255)
+        x = (184 - resized.width) // 2
+        y = 108 - resized.height - 2
+        frame.paste(resized, (x, y))
+        prepared.append(frame.point(lambda value: 0 if value < 180 else 255))
+    return prepared
+
+
 def clean_action_frame(action: str, frame_number: int, frame: Image.Image) -> Image.Image:
     cleaned = frame.copy()
     draw = ImageDraw.Draw(cleaned)
@@ -182,18 +271,38 @@ def clean_action_frame(action: str, frame_number: int, frame: Image.Image) -> Im
     return cleaned
 
 
+def clean_species_scene_frame(animal: str, action: str, frame_number: int, frame: Image.Image) -> Image.Image:
+    cleaned = frame.copy()
+    draw = ImageDraw.Draw(cleaned)
+    for min_x, min_y, max_x, max_y, center_x, count in connected_components(cleaned):
+        tiny_top_speck = max_y <= 15 and max_x - min_x <= 12 and max_y - min_y <= 12
+        if count <= 4 or tiny_top_speck:
+            draw.rectangle((min_x, min_y, max_x - 1, max_y - 1), fill=255)
+    if action == "feed" and animal == "panda" and frame_number == 1:
+        draw.rectangle((47, 82, 79, 103), fill=255)
+        draw.polygon(((45, 91), (77, 84), (80, 91), (48, 99)), fill=255, outline=0)
+        draw.line((56, 89, 59, 96), fill=0, width=1)
+        draw.line((67, 87, 70, 93), fill=0, width=1)
+        draw.rectangle((47, 100, 83, 107), fill=255)
+    if action == "water" and animal == "chicken" and frame_number < 3:
+        draw.rectangle((0, 0, 183, 20), fill=255)
+    return cleaned
+
+
 def blink_pose(bitmap: Image.Image, spec: dict) -> Image.Image:
     pose = bitmap.copy()
     draw = ImageDraw.Draw(pose)
+    radius = spec.get("eye_radius", 4)
     for x, y in spec["eyes"]:
-        draw.rectangle((x - 4, y - 4, x + 4, y + 4), fill=255)
-        draw.arc((x - 4, y - 2, x + 4, y + 4), 195, 345, fill=0, width=1)
+        draw.rectangle((x - radius, y - radius, x + radius, y + radius), fill=255)
+        draw.arc((x - radius, y - 2, x + radius, y + 5), 195, 345, fill=0, width=1)
     return pose
 
 
 def eat_pose(bitmap: Image.Image, spec: dict) -> Image.Image:
     # A slight forward lean makes the head visibly dip toward a bowl on the left.
-    tilted = bitmap.rotate(8, resample=Image.Resampling.NEAREST, expand=False, fillcolor=255)
+    tilted = bitmap.rotate(8, resample=Image.Resampling.BICUBIC, expand=False, fillcolor=255)
+    tilted = tilted.point(lambda value: 0 if value < 170 else 255)
     pose = Image.new("L", bitmap.size, 255)
     pose.paste(tilted, (-3, 4))
     draw = ImageDraw.Draw(pose)
@@ -237,12 +346,35 @@ def sleep_pose(bitmap: Image.Image, spec: dict) -> Image.Image:
     return pose
 
 
+def append_companion(output: list[str], image: Image.Image, name: str, spec: dict) -> None:
+    bitmap = prepare_bitmap(image, spec)
+    bitmap.save(PREVIEW_DIR / f"{name}.png")
+    prefix = name.upper()
+    output.append(f"const uint8_t {prefix}_WIDTH = {spec['width']};")
+    output.append(f"const uint8_t {prefix}_HEIGHT = {spec['height']};")
+    output.append(format_array(
+        f"{prefix}_BITMAP",
+        encode_bitmap(bitmap, spec["width"], spec["height"]),
+    ))
+    for pose_name, pose in (
+        ("BLINK", blink_pose(bitmap, spec)),
+        ("EAT", eat_pose(bitmap, spec)),
+        ("HAPPY", happy_pose(bitmap, spec, name)),
+        ("SLEEP", sleep_pose(bitmap, spec)),
+    ):
+        pose.save(PREVIEW_DIR / f"{name}-{pose_name.lower()}.png")
+        output.append(format_array(
+            f"{prefix}_{pose_name}_BITMAP",
+            encode_bitmap(pose, spec["width"], spec["height"]),
+        ))
+
+
 def format_array(name: str, values: list[int]) -> str:
     lines = []
     for start in range(0, len(values), 12):
         chunk = ", ".join(f"0x{value:02X}" for value in values[start:start + 12])
         lines.append(f"  {chunk},")
-    return f"const uint8_t {name}[] PROGMEM = {{\n" + "\n".join(lines) + "\n};\n"
+    return f"const uint8_t {name}[] BITMAP_PROGMEM = {{\n" + "\n".join(lines) + "\n};\n"
 
 
 def encode_rle(image: Image.Image) -> list[int]:
@@ -281,6 +413,7 @@ def validate_rle(image: Image.Image, runs: list[int]) -> None:
 def main() -> None:
     image = Image.open(SOURCE)
     new_companions = Image.open(NEW_COMPANIONS_SOURCE)
+    final_companions = Image.open(FINAL_COMPANIONS_SOURCE)
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
 
     output = [
@@ -288,43 +421,44 @@ def main() -> None:
         "",
         "#include <Arduino.h>",
         "",
+        "#if defined(__AVR__)",
+        '#define BITMAP_PROGMEM __attribute__((section(".text.zzbitmaps")))',
+        "#else",
+        "#define BITMAP_PROGMEM PROGMEM",
+        "#endif",
+        "",
     ]
 
     for name, spec in SPECS.items():
-        bitmap = prepare_bitmap(image, spec)
-        bitmap.save(PREVIEW_DIR / f"{name}.png")
-        prefix = name.upper()
-        output.append(f"const uint8_t {prefix}_WIDTH = {spec['width']};")
-        output.append(f"const uint8_t {prefix}_HEIGHT = {spec['height']};")
-        output.append(format_array(
-            f"{prefix}_BITMAP",
-            encode_bitmap(bitmap, spec["width"], spec["height"]),
-        ))
-        for pose_name, pose in (
-            ("BLINK", blink_pose(bitmap, spec)),
-            ("EAT", eat_pose(bitmap, spec)),
-            ("HAPPY", happy_pose(bitmap, spec, name)),
-            ("SLEEP", sleep_pose(bitmap, spec)),
-        ):
-            pose.save(PREVIEW_DIR / f"{name}-{pose_name.lower()}.png")
-            output.append(format_array(
-                f"{prefix}_{pose_name}_BITMAP",
-                encode_bitmap(pose, spec["width"], spec["height"]),
-            ))
+        append_companion(output, image, name, spec)
 
     for name, spec in NEW_COMPANION_SPECS.items():
-        bitmap = prepare_bitmap(new_companions, spec)
-        bitmap.save(PREVIEW_DIR / f"{name}.png")
-        prefix = name.upper()
-        output.append(f"const uint8_t {prefix}_WIDTH = {spec['width']};")
-        output.append(f"const uint8_t {prefix}_HEIGHT = {spec['height']};")
-        output.append(format_array(
-            f"{prefix}_BITMAP",
-            encode_bitmap(bitmap, spec["width"], spec["height"]),
-        ))
+        append_companion(output, new_companions, name, spec)
+
+    for name, spec in FINAL_COMPANION_SPECS.items():
+        append_companion(output, final_companions, name, spec)
 
     output.append("const uint8_t CAT_ACTION_SCENE_WIDTH = 184;")
     output.append("const uint8_t CAT_ACTION_SCENE_HEIGHT = 108;")
+    output.append("const uint8_t SPECIES_ACTION_SCENE_WIDTH = 184;")
+    output.append("const uint8_t SPECIES_ACTION_SCENE_HEIGHT = 108;")
+    for action, scene_sheets in (("feed", SPECIES_FEED_SHEETS), ("water", SPECIES_WATER_SHEETS)):
+        for source_path, animals in scene_sheets:
+            sheet = Image.open(source_path)
+            for row, animal in enumerate(animals):
+                contact_sheet = Image.new("L", (184 * 4, 108), 255)
+                for frame_number, frame in enumerate(prepare_grid_action_frames(sheet, row, len(animals))):
+                    frame = clean_species_scene_frame(animal, action, frame_number, frame)
+                    frame.save(PREVIEW_DIR / f"{animal}-{action}-scene-{frame_number}.png")
+                    contact_sheet.paste(frame, (184 * frame_number, 0))
+                    spans = encode_spans(frame)
+                    validate_spans(frame, spans)
+                    output.append(format_array(
+                        f"{animal.upper()}_{action.upper()}_{frame_number}_SPANS",
+                        spans,
+                    ))
+                contact_sheet.save(PREVIEW_DIR / f"{animal}-{action}-scene-sheet.png")
+
     for action in ACTION_SCENES:
         feed_source_frames = [
             ((25, 130, 510, 625), []),

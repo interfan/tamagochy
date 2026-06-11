@@ -17,6 +17,16 @@
 #include <Adafruit_ILI9341.h>
 #endif
 
+#if defined(__AVR__)
+typedef uint_farptr_t FlashAddress;
+#define FLASH_ADDRESS(symbol) pgm_get_far_address(symbol)
+#define READ_FLASH_BYTE(address) pgm_read_byte_far(address)
+#else
+typedef uintptr_t FlashAddress;
+#define FLASH_ADDRESS(symbol) reinterpret_cast<FlashAddress>(symbol)
+#define READ_FLASH_BYTE(address) pgm_read_byte(reinterpret_cast<const uint8_t *>(address))
+#endif
+
 const byte LEFT_PIN = 2;
 const byte SELECT_PIN = 3;
 const byte RIGHT_PIN = 4;
@@ -54,7 +64,8 @@ GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(
 #endif
 
 enum Screen : byte { LANGUAGE, SET_CLOCK, SET_DATE, SELECT_ANIMAL, EGG, HATCHING, HOME, ACTION_SCENE, GAME_MENU, OPTIONS };
-enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, CHICKEN, PIG, ANIMAL_COUNT };
+enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, CHICKEN, PIG, HAMSTER, PENGUIN, ANIMAL_COUNT };
+enum AnimalPose : byte { POSE_IDLE, POSE_BLINK, POSE_EAT, POSE_HAPPY, POSE_SLEEP };
 enum Action : byte {
   FEED, WATER, PLAY, SLEEP, OVERNIGHT, CLEAN, MEDICINE,
   LEARN, PET_ACTION, GROOM, WASH, SETTINGS, ACTION_COUNT
@@ -204,6 +215,8 @@ const __FlashStringHelper *animalName(Animal kind) {
     case FOX: return F("FEN");
     case CHICKEN: return F("PIPPI");
     case PIG: return F("TRUFFLE");
+    case HAMSTER: return F("NIBBLE");
+    case PENGUIN: return F("PIPER");
     default: return F("FRIEND");
   }
 }
@@ -226,7 +239,7 @@ void drawCenteredInBox(const __FlashStringHelper *text, int x, int y, int w, int
   display.print(text);
 }
 
-void drawScaledBitmap(int x, int y, const uint8_t *bitmap, int width, int height, int scalePercent) {
+void drawScaledBitmap(int x, int y, FlashAddress bitmap, int width, int height, int scalePercent) {
   int bytesPerRow = (width + 7) / 8;
   for (int sourceY = 0; sourceY < height; sourceY++) {
     int outputY = y + sourceY * scalePercent / 100;
@@ -235,7 +248,7 @@ void drawScaledBitmap(int x, int y, const uint8_t *bitmap, int width, int height
     for (int sourceX = 0; sourceX <= width; sourceX++) {
       bool black = false;
       if (sourceX < width) {
-        uint8_t value = pgm_read_byte(bitmap + sourceY * bytesPerRow + sourceX / 8);
+        uint8_t value = READ_FLASH_BYTE(bitmap + sourceY * bytesPerRow + sourceX / 8);
         black = value & (0x80 >> (sourceX % 8));
       }
       if (black && runStart < 0) runStart = sourceX;
@@ -400,7 +413,8 @@ void drawVirus(int x, int y) {
 
 void drawEgg(int x, int y, byte frame) {
   int lean = frame == 1 ? -4 : frame == 2 ? 4 : 0;
-  display.drawBitmap(x - EGG_WIDTH / 2 + lean, y - EGG_HEIGHT / 2, EGG_BITMAP, EGG_WIDTH, EGG_HEIGHT, GxEPD_BLACK);
+  drawScaledBitmap(x - EGG_WIDTH / 2 + lean, y - EGG_HEIGHT / 2,
+                   FLASH_ADDRESS(EGG_BITMAP), EGG_WIDTH, EGG_HEIGHT, 100);
   display.drawLine(x - 16 + lean, y - 29, x - 9 + lean, y - 23, GxEPD_BLACK);
   display.drawLine(x - 11 + lean, y - 21, x - 4 + lean, y - 17, GxEPD_BLACK);
   display.drawLine(x + 7 + lean, y - 28, x + 13 + lean, y - 22, GxEPD_BLACK);
@@ -425,7 +439,7 @@ void drawEggScaled(int x, int y, byte frame, int scalePercent) {
   int scaledWidth = EGG_WIDTH * scalePercent / 100;
   int scaledHeight = EGG_HEIGHT * scalePercent / 100;
   drawScaledBitmap(x - scaledWidth / 2 + lean, y - scaledHeight / 2,
-                   EGG_BITMAP, EGG_WIDTH, EGG_HEIGHT, scalePercent);
+                   FLASH_ADDRESS(EGG_BITMAP), EGG_WIDTH, EGG_HEIGHT, scalePercent);
   if (frame >= 1) {
     display.drawLine(x - 22 + lean, y - 8, x - 12 + lean, y - 1, GxEPD_BLACK);
     display.drawLine(x - 12 + lean, y - 1, x - 19 + lean, y + 8, GxEPD_BLACK);
@@ -437,13 +451,13 @@ void drawEggScaled(int x, int y, byte frame, int scalePercent) {
   }
 }
 
-void drawRleBitmap(int x, int y, const uint8_t *rle, uint16_t width, uint16_t height) {
+void drawRleBitmap(int x, int y, FlashAddress rle, uint16_t width, uint16_t height) {
   uint16_t px = 0;
   uint16_t py = 0;
   bool black = false;
   uint32_t index = 0;
   while (py < height) {
-    uint8_t run = pgm_read_byte(rle + index++);
+    uint8_t run = READ_FLASH_BYTE(rle + index++);
     if (run == 0) {
       black = !black;
       continue;
@@ -464,13 +478,13 @@ void drawRleBitmap(int x, int y, const uint8_t *rle, uint16_t width, uint16_t he
   }
 }
 
-void drawRleBitmapScaled(int x, int y, const uint8_t *rle, uint16_t width, uint16_t height, int scalePercent) {
+void drawRleBitmapScaled(int x, int y, FlashAddress rle, uint16_t width, uint16_t height, int scalePercent) {
   uint16_t px = 0;
   uint16_t py = 0;
   bool black = false;
   uint32_t index = 0;
   while (py < height) {
-    uint8_t run = pgm_read_byte(rle + index++);
+    uint8_t run = READ_FLASH_BYTE(rle + index++);
     if (run == 0) {
       black = !black;
       continue;
@@ -495,51 +509,116 @@ void drawRleBitmapScaled(int x, int y, const uint8_t *rle, uint16_t width, uint1
   }
 }
 
-const uint8_t *catActionFrame(Action action, byte frame) {
-  switch (action) {
-    case FEED:
-      return frame == 0 ? CAT_FEED_0_RLE : frame == 1 ? CAT_FEED_1_RLE : frame == 2 ? CAT_FEED_2_RLE : CAT_FEED_3_RLE;
-    case WATER:
-      return frame == 0 ? CAT_WATER_0_RLE : frame == 1 ? CAT_WATER_1_RLE : frame == 2 ? CAT_WATER_2_RLE : CAT_WATER_3_RLE;
-    case SLEEP:
-      return frame == 0 ? CAT_SLEEP_0_RLE : frame == 1 ? CAT_SLEEP_1_RLE : frame == 2 ? CAT_SLEEP_2_RLE : CAT_SLEEP_3_RLE;
-    case CLEAN:
-      return frame == 0 ? CAT_CLEAN_0_RLE : frame == 1 ? CAT_CLEAN_1_RLE : frame == 2 ? CAT_CLEAN_2_RLE : CAT_CLEAN_3_RLE;
-    case MEDICINE:
-      return frame == 0 ? CAT_MEDICINE_0_RLE : frame == 1 ? CAT_MEDICINE_1_RLE : frame == 2 ? CAT_MEDICINE_2_RLE : CAT_MEDICINE_3_RLE;
-    case LEARN:
-      return frame == 0 ? CAT_LEARN_0_RLE : frame == 1 ? CAT_LEARN_1_RLE : frame == 2 ? CAT_LEARN_2_RLE : CAT_LEARN_3_RLE;
-    case PET_ACTION:
-      return frame == 0 ? CAT_PET_0_RLE : frame == 1 ? CAT_PET_1_RLE : frame == 2 ? CAT_PET_2_RLE : CAT_PET_3_RLE;
-    case GROOM:
-      return frame == 0 ? CAT_GROOM_0_RLE : frame == 1 ? CAT_GROOM_1_RLE : frame == 2 ? CAT_GROOM_2_RLE : CAT_GROOM_3_RLE;
-    case WASH:
-      return frame == 0 ? CAT_WASH_0_RLE : frame == 1 ? CAT_WASH_1_RLE : frame == 2 ? CAT_WASH_2_RLE : CAT_WASH_3_RLE;
-    default:
-      return CAT_FEED_0_RLE;
+void drawSpanBitmap(int x, int y, FlashAddress spans, byte height) {
+  uint32_t index = 0;
+  for (byte row = 0; row < height; row++) {
+    while (true) {
+      byte start = READ_FLASH_BYTE(spans + index++);
+      if (start == 255) break;
+      byte length = READ_FLASH_BYTE(spans + index++);
+      display.fillRect(x + start, y + row, length, 1, GxEPD_BLACK);
+    }
   }
 }
 
-void animalBitmapInfo(Animal kind, const uint8_t *&bitmap, byte &width, byte &height) {
-  bitmap = CAT_BITMAP;
+FlashAddress catActionFrame(Action action, byte frame) {
+#define CAT_FRAME(NAME) \
+  (frame == 0 ? FLASH_ADDRESS(CAT_##NAME##_0_RLE) : \
+   frame == 1 ? FLASH_ADDRESS(CAT_##NAME##_1_RLE) : \
+   frame == 2 ? FLASH_ADDRESS(CAT_##NAME##_2_RLE) : FLASH_ADDRESS(CAT_##NAME##_3_RLE))
+  switch (action) {
+    case FEED:
+      return CAT_FRAME(FEED);
+    case WATER:
+      return CAT_FRAME(WATER);
+    case SLEEP:
+    case OVERNIGHT:
+      return CAT_FRAME(SLEEP);
+    case CLEAN:
+      return CAT_FRAME(CLEAN);
+    case MEDICINE:
+      return CAT_FRAME(MEDICINE);
+    case LEARN:
+      return CAT_FRAME(LEARN);
+    case PET_ACTION:
+      return CAT_FRAME(PET);
+    case GROOM:
+      return CAT_FRAME(GROOM);
+    case WASH:
+      return CAT_FRAME(WASH);
+    default:
+      return FLASH_ADDRESS(CAT_FEED_0_RLE);
+  }
+#undef CAT_FRAME
+}
+
+FlashAddress speciesActionFrame(Animal kind, Action action, byte frame) {
+#define ACTION_FRAME(PREFIX, NAME) \
+  (frame == 0 ? FLASH_ADDRESS(PREFIX##_##NAME##_0_SPANS) : \
+   frame == 1 ? FLASH_ADDRESS(PREFIX##_##NAME##_1_SPANS) : \
+   frame == 2 ? FLASH_ADDRESS(PREFIX##_##NAME##_2_SPANS) : FLASH_ADDRESS(PREFIX##_##NAME##_3_SPANS))
+#define ANIMAL_ACTION_FRAME(PREFIX) (action == WATER ? ACTION_FRAME(PREFIX, WATER) : ACTION_FRAME(PREFIX, FEED))
+  switch (kind) {
+    case DOG: return ANIMAL_ACTION_FRAME(DOG);
+    case BUNNY: return ANIMAL_ACTION_FRAME(BUNNY);
+    case PANDA: return ANIMAL_ACTION_FRAME(PANDA);
+    case DRAGON: return ANIMAL_ACTION_FRAME(DRAGON);
+    case FOX: return ANIMAL_ACTION_FRAME(FOX);
+    case CHICKEN: return ANIMAL_ACTION_FRAME(CHICKEN);
+    case PIG: return ANIMAL_ACTION_FRAME(PIG);
+    case HAMSTER: return ANIMAL_ACTION_FRAME(HAMSTER);
+    case PENGUIN: return ANIMAL_ACTION_FRAME(PENGUIN);
+    default: return ANIMAL_ACTION_FRAME(DOG);
+  }
+#undef ANIMAL_ACTION_FRAME
+#undef ACTION_FRAME
+}
+
+void animalBitmapInfo(Animal kind, FlashAddress &bitmap, byte &width, byte &height) {
+  bitmap = FLASH_ADDRESS(CAT_BITMAP);
   width = CAT_WIDTH;
   height = CAT_HEIGHT;
   switch (kind) {
-    case CAT: bitmap = CAT_BITMAP; width = CAT_WIDTH; height = CAT_HEIGHT; break;
-    case DOG: bitmap = DOG_BITMAP; width = DOG_WIDTH; height = DOG_HEIGHT; break;
-    case BUNNY: bitmap = BUNNY_BITMAP; width = BUNNY_WIDTH; height = BUNNY_HEIGHT; break;
-    case PANDA: bitmap = PANDA_BITMAP; width = PANDA_WIDTH; height = PANDA_HEIGHT; break;
-    case DRAGON: bitmap = DRAGON_BITMAP; width = DRAGON_WIDTH; height = DRAGON_HEIGHT; break;
-    case FOX: bitmap = FOX_BITMAP; width = FOX_WIDTH; height = FOX_HEIGHT; break;
-    case CHICKEN: bitmap = CHICKEN_BITMAP; width = CHICKEN_WIDTH; height = CHICKEN_HEIGHT; break;
-    case PIG: bitmap = PIG_BITMAP; width = PIG_WIDTH; height = PIG_HEIGHT; break;
+    case CAT: bitmap = FLASH_ADDRESS(CAT_BITMAP); width = CAT_WIDTH; height = CAT_HEIGHT; break;
+    case DOG: bitmap = FLASH_ADDRESS(DOG_BITMAP); width = DOG_WIDTH; height = DOG_HEIGHT; break;
+    case BUNNY: bitmap = FLASH_ADDRESS(BUNNY_BITMAP); width = BUNNY_WIDTH; height = BUNNY_HEIGHT; break;
+    case PANDA: bitmap = FLASH_ADDRESS(PANDA_BITMAP); width = PANDA_WIDTH; height = PANDA_HEIGHT; break;
+    case DRAGON: bitmap = FLASH_ADDRESS(DRAGON_BITMAP); width = DRAGON_WIDTH; height = DRAGON_HEIGHT; break;
+    case FOX: bitmap = FLASH_ADDRESS(FOX_BITMAP); width = FOX_WIDTH; height = FOX_HEIGHT; break;
+    case CHICKEN: bitmap = FLASH_ADDRESS(CHICKEN_BITMAP); width = CHICKEN_WIDTH; height = CHICKEN_HEIGHT; break;
+    case PIG: bitmap = FLASH_ADDRESS(PIG_BITMAP); width = PIG_WIDTH; height = PIG_HEIGHT; break;
+    case HAMSTER: bitmap = FLASH_ADDRESS(HAMSTER_BITMAP); width = HAMSTER_WIDTH; height = HAMSTER_HEIGHT; break;
+    case PENGUIN: bitmap = FLASH_ADDRESS(PENGUIN_BITMAP); width = PENGUIN_WIDTH; height = PENGUIN_HEIGHT; break;
     default: break;
   }
 }
 
+void animalPoseBitmapInfo(Animal kind, AnimalPose pose, FlashAddress &bitmap, byte &width, byte &height) {
+  animalBitmapInfo(kind, bitmap, width, height);
+#define SET_ANIMAL_POSE(PREFIX) \
+  bitmap = pose == POSE_BLINK ? FLASH_ADDRESS(PREFIX##_BLINK_BITMAP) : \
+           pose == POSE_EAT ? FLASH_ADDRESS(PREFIX##_EAT_BITMAP) : \
+           pose == POSE_HAPPY ? FLASH_ADDRESS(PREFIX##_HAPPY_BITMAP) : \
+           pose == POSE_SLEEP ? FLASH_ADDRESS(PREFIX##_SLEEP_BITMAP) : FLASH_ADDRESS(PREFIX##_BITMAP)
+  switch (kind) {
+    case CAT: SET_ANIMAL_POSE(CAT); break;
+    case DOG: SET_ANIMAL_POSE(DOG); break;
+    case BUNNY: SET_ANIMAL_POSE(BUNNY); break;
+    case PANDA: SET_ANIMAL_POSE(PANDA); break;
+    case DRAGON: SET_ANIMAL_POSE(DRAGON); break;
+    case FOX: SET_ANIMAL_POSE(FOX); break;
+    case CHICKEN: SET_ANIMAL_POSE(CHICKEN); break;
+    case PIG: SET_ANIMAL_POSE(PIG); break;
+    case HAMSTER: SET_ANIMAL_POSE(HAMSTER); break;
+    case PENGUIN: SET_ANIMAL_POSE(PENGUIN); break;
+    default: break;
+  }
+#undef SET_ANIMAL_POSE
+}
+
 void drawAnimalScaled(int x, int y, Animal kind, byte pose, int scalePercent) {
   int bounce = pose % 2 ? -3 : 0;
-  const uint8_t *bitmap;
+  FlashAddress bitmap;
   byte width;
   byte height;
   animalBitmapInfo(kind, bitmap, width, height);
@@ -548,14 +627,25 @@ void drawAnimalScaled(int x, int y, Animal kind, byte pose, int scalePercent) {
   drawScaledBitmap(x - scaledWidth / 2, y + bounce - scaledHeight / 2, bitmap, width, height, scalePercent);
 }
 
+void drawAnimalPoseScaled(int x, int y, Animal kind, AnimalPose animalPose, byte frame, int scalePercent) {
+  int bounce = frame % 2 ? -3 : 0;
+  FlashAddress bitmap;
+  byte width;
+  byte height;
+  animalPoseBitmapInfo(kind, animalPose, bitmap, width, height);
+  int scaledWidth = width * scalePercent / 100;
+  int scaledHeight = height * scalePercent / 100;
+  drawScaledBitmap(x - scaledWidth / 2, y + bounce - scaledHeight / 2, bitmap, width, height, scalePercent);
+}
+
 void drawAnimal(int x, int y, Animal kind, byte pose) {
   int bounce = pose % 2 ? -3 : 0;
   int top = y + bounce;
-  const uint8_t *bitmap;
+  FlashAddress bitmap;
   byte width;
   byte height;
-  animalBitmapInfo(kind, bitmap, width, height);
-  display.drawBitmap(x - width / 2, top - height / 2, bitmap, width, height, GxEPD_BLACK);
+  animalPoseBitmapInfo(kind, pet.sleeping ? POSE_SLEEP : POSE_IDLE, bitmap, width, height);
+  drawScaledBitmap(x - width / 2, top - height / 2, bitmap, width, height, 100);
   if (pet.sleeping) {
     display.setTextSize(1);
     display.setCursor(x + 25, top - 34);
@@ -564,6 +654,28 @@ void drawAnimal(int x, int y, Animal kind, byte pose) {
     display.print(F("Z"));
     display.setCursor(x + 37, top - 22);
     display.print(F("Z"));
+  }
+}
+
+AnimalPose actionAnimalPose(Action action, byte frame) {
+  switch (action) {
+    case FEED:
+      return frame == 0 ? POSE_IDLE : frame < 3 ? POSE_EAT : POSE_HAPPY;
+    case WATER:
+      return frame == 0 ? POSE_IDLE : frame == 1 ? POSE_BLINK : frame == 2 ? POSE_IDLE : POSE_HAPPY;
+    case SLEEP:
+    case OVERNIGHT:
+      return frame == 0 ? POSE_BLINK : POSE_SLEEP;
+    case CLEAN:
+    case MEDICINE:
+    case LEARN:
+      return frame == 0 ? POSE_IDLE : frame == 1 ? POSE_BLINK : frame == 2 ? POSE_IDLE : POSE_HAPPY;
+    case PET_ACTION:
+    case GROOM:
+    case WASH:
+      return frame % 2 ? POSE_HAPPY : POSE_BLINK;
+    default:
+      return POSE_HAPPY;
   }
 }
 
@@ -769,26 +881,142 @@ void drawEggScreen() {
   drawEggScaled(100, 103, eggFrame, 130);
 }
 
+void drawSceneSpark(int x, int y) {
+  display.drawLine(x - 5, y, x + 5, y, GxEPD_BLACK);
+  display.drawLine(x, y - 5, x, y + 5, GxEPD_BLACK);
+  display.drawLine(x - 3, y - 3, x + 3, y + 3, GxEPD_BLACK);
+  display.drawLine(x + 3, y - 3, x - 3, y + 3, GxEPD_BLACK);
+}
+
+void drawSpeciesSceneAccent(Animal kind, Action action, byte frame) {
+  int shift = frame % 2 ? 3 : 0;
+  switch (kind) {
+    case DOG:
+      display.drawCircle(171, 130 - shift, 3, GxEPD_BLACK);
+      display.drawCircle(163, 137 - shift, 3, GxEPD_BLACK);
+      display.fillCircle(167, 130 - shift, 1, GxEPD_BLACK);
+      break;
+    case BUNNY:
+      display.drawLine(158, 73 - shift, 174, 69 - shift, GxEPD_BLACK);
+      display.drawLine(160, 80 - shift, 178, 80 - shift, GxEPD_BLACK);
+      break;
+    case PANDA:
+      display.drawLine(165, 119, 178, 91 - shift, GxEPD_BLACK);
+      display.drawEllipse(176, 93 - shift, 6, 3, GxEPD_BLACK);
+      display.drawEllipse(168, 102 - shift, 6, 3, GxEPD_BLACK);
+      break;
+    case DRAGON:
+      if (action == WATER || action == WASH) {
+        display.drawCircle(170, 82 - shift, 3, GxEPD_BLACK);
+        display.drawCircle(179, 72 + shift, 5, GxEPD_BLACK);
+      } else {
+        display.fillTriangle(173, 91 - shift, 166, 104 - shift, 179, 104 - shift, GxEPD_BLACK);
+        display.fillTriangle(173, 96 - shift, 169, 104 - shift, 177, 104 - shift, GxEPD_WHITE);
+      }
+      break;
+    case FOX:
+      display.drawLine(159, 133 - shift, 177, 126 - shift, GxEPD_BLACK);
+      display.drawLine(161, 139 - shift, 181, 136 - shift, GxEPD_BLACK);
+      break;
+    case CHICKEN:
+      display.drawEllipse(169, 105 - shift, 7, 3, GxEPD_BLACK);
+      display.drawLine(166, 104 - shift, 172, 99 - shift, GxEPD_BLACK);
+      break;
+    case PIG:
+      display.drawCircle(172, 118 - shift, 7, GxEPD_BLACK);
+      display.drawCircle(174, 118 - shift, 3, GxEPD_WHITE);
+      break;
+    case HAMSTER:
+      display.drawEllipse(171, 126 - shift, 5, 3, GxEPD_BLACK);
+      display.drawLine(166, 126 - shift, 176, 126 - shift, GxEPD_BLACK);
+      break;
+    case PENGUIN:
+      display.drawLine(164, 91 - shift, 180, 91 - shift, GxEPD_BLACK);
+      display.drawLine(172, 83 - shift, 172, 99 - shift, GxEPD_BLACK);
+      display.drawLine(166, 85 - shift, 178, 97 - shift, GxEPD_BLACK);
+      display.drawLine(178, 85 - shift, 166, 97 - shift, GxEPD_BLACK);
+      break;
+    default: break;
+  }
+  if (frame == 3 && action != SLEEP && action != OVERNIGHT) drawSceneSpark(177, 58);
+}
+
 void drawScene() {
   drawClock();
   if (animal == CAT) {
     drawRleBitmapScaled(1, 42, catActionFrame(sceneAction, sceneFrame % 4),
                         CAT_ACTION_SCENE_WIDTH, CAT_ACTION_SCENE_HEIGHT, 108);
+  } else if (sceneAction == FEED || sceneAction == WATER) {
+    drawSpanBitmap(8, 46, speciesActionFrame(animal, sceneAction, sceneFrame % 4), SPECIES_ACTION_SCENE_HEIGHT);
   } else {
-    drawAnimalScaled(100, 116, animal, sceneFrame, 145);
+    int animalX = sceneAction == CLEAN || sceneAction == GROOM ? 83 :
+                  sceneAction == WATER || sceneAction == MEDICINE || sceneAction == LEARN ? 116 : 100;
+    drawAnimalPoseScaled(animalX, 116, animal, actionAnimalPose(sceneAction, sceneFrame), sceneFrame, 132);
     switch (sceneAction) {
-      case FEED: display.drawRoundRect(32 + sceneFrame * 5, 124, 30, 11, 5, GxEPD_BLACK); display.fillCircle(40 + sceneFrame * 5, 122, 2, GxEPD_BLACK); break;
-      case WATER: display.drawCircle(42 + sceneFrame * 4, 120, 10, GxEPD_BLACK); display.fillTriangle(42 + sceneFrame * 4, 88, 29 + sceneFrame * 4, 120, 55 + sceneFrame * 4, 120, GxEPD_BLACK); break;
-      case SLEEP: display.setTextSize(2); display.setCursor(148 + sceneFrame * 3, 74 - sceneFrame * 5); display.print(F("ZZZ")); break;
-      case OVERNIGHT: display.drawCircle(38, 90, 14, GxEPD_BLACK); display.fillCircle(38, 90, 1, GxEPD_BLACK); break;
-      case CLEAN: display.drawLine(150 - sceneFrame * 6, 84, 172 - sceneFrame * 6, 132, GxEPD_BLACK); display.fillTriangle(161 - sceneFrame * 6, 120, 178 - sceneFrame * 6, 113, 154 - sceneFrame * 6, 136, GxEPD_BLACK); break;
-      case MEDICINE: display.drawRoundRect(150 - sceneFrame * 5, 98, 28, 12, 6, GxEPD_BLACK); display.drawLine(164 - sceneFrame * 5, 99, 164 - sceneFrame * 5, 109, GxEPD_BLACK); drawVirus(38, 92); break;
-      case LEARN: display.drawRect(20, 84 - sceneFrame * 3, 42, 46, GxEPD_BLACK); display.drawLine(41, 84 - sceneFrame * 3, 41, 130 - sceneFrame * 3, GxEPD_BLACK); break;
-      case PET_ACTION: drawHeart(28, 92 - sceneFrame * 6); drawHeart(155, 78 + sceneFrame * 4); break;
-      case GROOM: display.drawLine(25 + sceneFrame * 7, 84, 60 + sceneFrame * 7, 130, GxEPD_BLACK); display.drawLine(32 + sceneFrame * 7, 79, 67 + sceneFrame * 7, 125, GxEPD_BLACK); break;
-      case WASH: for (byte i = 0; i < 5; i++) display.drawCircle(30 + i * 30, 76 + ((i + sceneFrame) % 2) * 14, 6, GxEPD_BLACK); break;
+      case SLEEP:
+        display.setTextSize(2);
+        display.setCursor(148 + sceneFrame * 2, 78 - sceneFrame * 5);
+        display.print(F("Z"));
+        display.setCursor(164 + sceneFrame * 2, 62 - sceneFrame * 5);
+        display.print(F("Z"));
+        break;
+      case OVERNIGHT:
+        display.fillCircle(31, 80, 16, GxEPD_BLACK);
+        display.fillCircle(38, 73, 16, GxEPD_WHITE);
+        display.setTextSize(2);
+        display.setCursor(153, 66 - sceneFrame * 4);
+        display.print(F("Z"));
+        break;
+      case CLEAN: {
+        int x = 173 - sceneFrame * 5;
+        display.drawLine(x, 73, x - 19, 137, GxEPD_BLACK);
+        display.drawLine(x + 2, 74, x - 17, 138, GxEPD_BLACK);
+        display.drawLine(x - 28, 136, x - 7, 141, GxEPD_BLACK);
+        display.drawLine(x - 25, 130, x - 4, 136, GxEPD_BLACK);
+        display.drawLine(x - 28, 136, x - 25, 130, GxEPD_BLACK);
+        break;
+      }
+      case MEDICINE: {
+        int x = 24 + sceneFrame * 3;
+        display.drawRoundRect(x, 83, 31, 14, 7, GxEPD_BLACK);
+        display.drawLine(x + 15, 84, x + 15, 96, GxEPD_BLACK);
+        display.fillRoundRect(x + 2, 85, 13, 10, 5, GxEPD_BLACK);
+        if (sceneFrame < 3) drawVirus(175, 77 + sceneFrame * 5);
+        break;
+      }
+      case LEARN:
+        display.drawLine(15, 92 - sceneFrame * 2, 38, 86 - sceneFrame * 2, GxEPD_BLACK);
+        display.drawLine(38, 86 - sceneFrame * 2, 61, 92 - sceneFrame * 2, GxEPD_BLACK);
+        display.drawLine(15, 92 - sceneFrame * 2, 15, 131 - sceneFrame * 2, GxEPD_BLACK);
+        display.drawLine(61, 92 - sceneFrame * 2, 61, 131 - sceneFrame * 2, GxEPD_BLACK);
+        display.drawLine(15, 131 - sceneFrame * 2, 38, 137 - sceneFrame * 2, GxEPD_BLACK);
+        display.drawLine(38, 86 - sceneFrame * 2, 38, 137 - sceneFrame * 2, GxEPD_BLACK);
+        display.drawLine(38, 137 - sceneFrame * 2, 61, 131 - sceneFrame * 2, GxEPD_BLACK);
+        break;
+      case PET_ACTION:
+        drawHeart(25, 98 - sceneFrame * 7);
+        drawHeart(165, 78 + sceneFrame * 3);
+        break;
+      case GROOM: {
+        int x = 161 - sceneFrame * 5;
+        display.drawEllipse(x, 91, 15, 7, GxEPD_BLACK);
+        display.drawLine(x + 11, 96, x + 25, 114, GxEPD_BLACK);
+        for (byte tooth = 0; tooth < 5; tooth++) {
+          display.drawLine(x - 9 + tooth * 5, 98, x - 9 + tooth * 5, 107, GxEPD_BLACK);
+        }
+        break;
+      }
+      case WASH:
+        for (byte i = 0; i < 5; i++) {
+          int x = 24 + i * 38;
+          int y = 72 + ((i + sceneFrame) % 2) * 16;
+          display.drawCircle(x, y, 5, GxEPD_BLACK);
+          display.fillCircle(x - 2, y - 2, 1, GxEPD_BLACK);
+        }
+        break;
       default: break;
     }
+    drawSpeciesSceneAccent(animal, sceneAction, sceneFrame);
   }
 }
 
