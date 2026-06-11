@@ -15,6 +15,8 @@ SPECIES_FEED_COMPANIONS_SOURCE = ACTION_SCENE_DIR / "species-feed-companions.png
 SPECIES_FEED_SPECIAL_SOURCE = ACTION_SCENE_DIR / "species-feed-dragon-fox-penguin.png"
 SPECIES_WATER_COMPANIONS_SOURCE = ACTION_SCENE_DIR / "species-water-companions.png"
 SPECIES_WATER_SPECIAL_SOURCE = ACTION_SCENE_DIR / "species-water-dragon-fox-penguin.png"
+SPECIES_SLEEP_COMPANIONS_SOURCE = ACTION_SCENE_DIR / "species-sleep-companions.png"
+SPECIES_SLEEP_SPECIAL_SOURCE = ACTION_SCENE_DIR / "species-sleep-dragon-fox-penguin.png"
 ACTION_SCENES = (
     "feed", "water", "sleep", "overnight", "clean",
     "medicine", "learn", "pet", "groom", "wash",
@@ -72,6 +74,10 @@ SPECIES_FEED_SHEETS = (
 SPECIES_WATER_SHEETS = (
     (SPECIES_WATER_COMPANIONS_SOURCE, ("dog", "bunny", "panda", "chicken", "pig", "hamster")),
     (SPECIES_WATER_SPECIAL_SOURCE, ("dragon", "fox", "penguin")),
+)
+SPECIES_SLEEP_SHEETS = (
+    (SPECIES_SLEEP_COMPANIONS_SOURCE, ("dog", "bunny", "panda", "chicken", "pig", "hamster")),
+    (SPECIES_SLEEP_SPECIAL_SOURCE, ("dragon", "fox", "penguin")),
 )
 
 
@@ -286,6 +292,18 @@ def clean_species_scene_frame(animal: str, action: str, frame_number: int, frame
         draw.rectangle((47, 100, 83, 107), fill=255)
     if action == "water" and animal == "chicken" and frame_number < 3:
         draw.rectangle((0, 0, 183, 20), fill=255)
+    if action == "sleep" and frame_number < 3:
+        clear_top = animal in ("panda", "bunny") or \
+            (animal in ("pig", "chicken") and frame_number > 0)
+        if clear_top:
+            draw.rectangle((0, 0, 183, 25), fill=255)
+    if action == "sleep" and animal in ("panda", "bunny"):
+        draw.rectangle((0, 0, 150, 25), fill=255)
+        for min_x, min_y, max_x, max_y, center_x, count in connected_components(cleaned):
+            if max_x <= 150 and max_y <= 35 and count <= 35:
+                draw.rectangle((min_x, min_y, max_x - 1, max_y - 1), fill=255)
+    if action == "sleep" and animal == "bunny" and frame_number >= 2:
+        draw.arc((36, 10, 148, 116), 180, 360, fill=0, width=2)
     return cleaned
 
 
@@ -357,8 +375,6 @@ def append_companion(output: list[str], image: Image.Image, name: str, spec: dic
         encode_bitmap(bitmap, spec["width"], spec["height"]),
     ))
     for pose_name, pose in (
-        ("BLINK", blink_pose(bitmap, spec)),
-        ("EAT", eat_pose(bitmap, spec)),
         ("HAPPY", happy_pose(bitmap, spec, name)),
         ("SLEEP", sleep_pose(bitmap, spec)),
     ):
@@ -442,7 +458,11 @@ def main() -> None:
     output.append("const uint8_t CAT_ACTION_SCENE_HEIGHT = 108;")
     output.append("const uint8_t SPECIES_ACTION_SCENE_WIDTH = 184;")
     output.append("const uint8_t SPECIES_ACTION_SCENE_HEIGHT = 108;")
-    for action, scene_sheets in (("feed", SPECIES_FEED_SHEETS), ("water", SPECIES_WATER_SHEETS)):
+    for action, scene_sheets in (
+        ("feed", SPECIES_FEED_SHEETS),
+        ("water", SPECIES_WATER_SHEETS),
+        ("sleep", SPECIES_SLEEP_SHEETS),
+    ):
         for source_path, animals in scene_sheets:
             sheet = Image.open(source_path)
             for row, animal in enumerate(animals):
@@ -451,11 +471,11 @@ def main() -> None:
                     frame = clean_species_scene_frame(animal, action, frame_number, frame)
                     frame.save(PREVIEW_DIR / f"{animal}-{action}-scene-{frame_number}.png")
                     contact_sheet.paste(frame, (184 * frame_number, 0))
-                    spans = encode_spans(frame)
-                    validate_spans(frame, spans)
+                    runs = encode_rle(frame)
+                    validate_rle(frame, runs)
                     output.append(format_array(
-                        f"{animal.upper()}_{action.upper()}_{frame_number}_SPANS",
-                        spans,
+                        f"{animal.upper()}_{action.upper()}_{frame_number}_RLE",
+                        runs,
                     ))
                 contact_sheet.save(PREVIEW_DIR / f"{animal}-{action}-scene-sheet.png")
 

@@ -125,7 +125,9 @@ larger hand-drawn action scenes. The other animals use full feeding scenes
 with species-specific food: bone, carrot, bamboo, meat, grain, apple, seeds,
 or fish. They also have full drinking scenes with species-sized bowls and
 details such as the dragon's stone basin and penguin's ice-rimmed dish. Their
-remaining care scenes use individual motion accents and clean shared props.
+sleep and overnight actions reuse species-specific scenes: nest, cave, igloo,
+burrow, hammock, mud puddle, or pet bed. Their remaining care scenes use
+individual motion accents and clean shared props.
 
 ## Clock Limitation
 
@@ -144,15 +146,26 @@ The repository includes `diagram.json` and `wokwi.toml`. Install the
 2. Press `F1`.
 3. Run **Wokwi: Start Simulator**.
 
-Wokwi uses a stock ILI9341 LCD as the preview screen, while the physical
-build continues to compile for the 1.54-inch e-paper display. The simulator
-still exercises the Mega firmware, buttons, buzzer, menus, and animations.
+Wokwi uses a standard ESP32 DevKit and stock ILI9341 LCD as the preview
+target, while the physical build continues to compile for the 1.54-inch
+e-paper display. ESP32 is only the supported Wokwi stand-in for the future
+nRF52840 hardware; the game code, buttons, buzzer, menus, and animations are
+shared. The build generates an ESP32 flash layout for Wokwi so its bootloader,
+partition table, boot metadata, and application are loaded at their correct
+addresses.
+
+Every `build-wokwi.cmd` run measures the compiled ESP32 application's flash
+usage and rejects builds above **1,048,576 bytes**, matching the raw flash
+capacity of an nRF52840 when no Bluetooth SoftDevice is reserved. It also
+reports the generated bitmap payload separately, making animation growth easy
+to track. Framework overhead differs between ESP32 and nRF52840, so the final
+nRF build must still be measured before hardware release.
 
 On the egg screen, press **Select three times quickly** to hatch immediately.
 This shortcut is compiled only into the Wokwi simulation firmware.
 
-`diagram.json` also includes a `wokwi-ds3231` RTC module wired on I2C
-(Mega pins D20/SDA, D21/SCL). The RTC keeps simulation time moving while
+`diagram.json` also includes a `wokwi-ds3231` RTC module wired on ESP32 I2C
+pins GPIO21/SDA and GPIO22/SCL. The RTC keeps simulation time moving while
 the project is paused or restarted in Wokwi.
 
 The original kawaii animal concept sheets used as drawing references are saved

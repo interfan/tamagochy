@@ -1,20 +1,23 @@
 /*
-  Mega 2560 E-Paper Tamagotchi
+  E-Paper Tamagotchi
 
   Controls everywhere:
     D2 = LEFT / previous / decrease
     D3 = SELECT / confirm
     D4 = RIGHT / next / increase
 
-  The software clock and hatch timer advance while the Mega is powered.
+  The physical build targets the Mega/e-paper wiring below. Wokwi uses a
+  standard ESP32 DevKit as a 32-bit preview target for the future nRF52840.
 */
 
 #include <Adafruit_GFX.h>
 #include <EEPROM.h>
-#include <GxEPD2_BW.h>
 #include "companion_bitmaps.h"
 #ifdef WOKWI_SIM
+#include <SPI.h>
 #include <Adafruit_ILI9341.h>
+#else
+#include <GxEPD2_BW.h>
 #endif
 
 #if defined(__AVR__)
@@ -27,6 +30,16 @@ typedef uintptr_t FlashAddress;
 #define READ_FLASH_BYTE(address) pgm_read_byte(reinterpret_cast<const uint8_t *>(address))
 #endif
 
+#ifdef WOKWI_SIM
+const byte LEFT_PIN = 25;
+const byte SELECT_PIN = 26;
+const byte RIGHT_PIN = 27;
+const byte BUZZER_PIN = 32;
+const byte EPD_CS_PIN = 5;
+const byte EPD_DC_PIN = 2;
+const byte EPD_RST_PIN = 4;
+const byte EPD_BUSY_PIN = 33;
+#else
 const byte LEFT_PIN = 2;
 const byte SELECT_PIN = 3;
 const byte RIGHT_PIN = 4;
@@ -35,6 +48,7 @@ const byte EPD_CS_PIN = 53;
 const byte EPD_DC_PIN = 49;
 const byte EPD_RST_PIN = 48;
 const byte EPD_BUSY_PIN = 47;
+#endif
 
 const unsigned long DEBOUNCE_MS = 35;
 const unsigned long CLOCK_TICK_MS = 60000UL;
@@ -49,7 +63,10 @@ const uint32_t SAVE_MAGIC = 0x54414D41UL;
 class WokwiDisplay : public Adafruit_ILI9341 {
  public:
   WokwiDisplay(byte cs, byte dc, byte rst) : Adafruit_ILI9341(cs, dc, rst) {}
-  void init(unsigned long) { begin(); }
+  void init(unsigned long) {
+    SPI.begin(18, 19, 23, EPD_CS_PIN);
+    begin(20000000);
+  }
   void setFullWindow() {}
   void setPartialWindow(uint16_t, uint16_t, uint16_t, uint16_t) {}
   void firstPage() {}
@@ -65,7 +82,7 @@ GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(
 
 enum Screen : byte { LANGUAGE, SET_CLOCK, SET_DATE, SELECT_ANIMAL, EGG, HATCHING, HOME, ACTION_SCENE, GAME_MENU, OPTIONS };
 enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, CHICKEN, PIG, HAMSTER, PENGUIN, ANIMAL_COUNT };
-enum AnimalPose : byte { POSE_IDLE, POSE_BLINK, POSE_EAT, POSE_HAPPY, POSE_SLEEP };
+enum AnimalPose : byte { POSE_IDLE, POSE_HAPPY, POSE_SLEEP };
 enum Action : byte {
   FEED, WATER, PLAY, SLEEP, OVERNIGHT, CLEAN, MEDICINE,
   LEARN, PET_ACTION, GROOM, WASH, SETTINGS, ACTION_COUNT
@@ -153,7 +170,7 @@ void chirp(unsigned int frequency, unsigned int duration) {
   tone(BUZZER_PIN, frequency, duration);
 }
 
-void playTune(const int *notes, const byte *lengths, byte count) {
+void playTune(const int *notes, const uint16_t *lengths, byte count) {
   for (byte i = 0; i < count; i++) {
     tone(BUZZER_PIN, notes[i], lengths[i]);
     delay(lengths[i] + 35);
@@ -163,13 +180,13 @@ void playTune(const int *notes, const byte *lengths, byte count) {
 
 void happyTune() {
   const int notes[] = {523, 659, 784};
-  const byte lengths[] = {90, 90, 150};
+  const uint16_t lengths[] = {90, 90, 150};
   playTune(notes, lengths, 3);
 }
 
 void hatchTune() {
   const int notes[] = {523, 659, 784, 1047, 784, 1047};
-  const byte lengths[] = {100, 100, 100, 220, 100, 300};
+  const uint16_t lengths[] = {100, 100, 100, 220, 100, 300};
   playTune(notes, lengths, 6);
 }
 
@@ -189,6 +206,9 @@ bool pressed(Button &button) {
 void saveGame(byte stage) {
   SaveData data = {SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft};
   EEPROM.put(0, data);
+#if defined(ESP32)
+  EEPROM.commit();
+#endif
 }
 
 bool loadGame() {
@@ -509,18 +529,6 @@ void drawRleBitmapScaled(int x, int y, FlashAddress rle, uint16_t width, uint16_
   }
 }
 
-void drawSpanBitmap(int x, int y, FlashAddress spans, byte height) {
-  uint32_t index = 0;
-  for (byte row = 0; row < height; row++) {
-    while (true) {
-      byte start = READ_FLASH_BYTE(spans + index++);
-      if (start == 255) break;
-      byte length = READ_FLASH_BYTE(spans + index++);
-      display.fillRect(x + start, y + row, length, 1, GxEPD_BLACK);
-    }
-  }
-}
-
 FlashAddress catActionFrame(Action action, byte frame) {
 #define CAT_FRAME(NAME) \
   (frame == 0 ? FLASH_ADDRESS(CAT_##NAME##_0_RLE) : \
@@ -554,10 +562,12 @@ FlashAddress catActionFrame(Action action, byte frame) {
 
 FlashAddress speciesActionFrame(Animal kind, Action action, byte frame) {
 #define ACTION_FRAME(PREFIX, NAME) \
-  (frame == 0 ? FLASH_ADDRESS(PREFIX##_##NAME##_0_SPANS) : \
-   frame == 1 ? FLASH_ADDRESS(PREFIX##_##NAME##_1_SPANS) : \
-   frame == 2 ? FLASH_ADDRESS(PREFIX##_##NAME##_2_SPANS) : FLASH_ADDRESS(PREFIX##_##NAME##_3_SPANS))
-#define ANIMAL_ACTION_FRAME(PREFIX) (action == WATER ? ACTION_FRAME(PREFIX, WATER) : ACTION_FRAME(PREFIX, FEED))
+  (frame == 0 ? FLASH_ADDRESS(PREFIX##_##NAME##_0_RLE) : \
+   frame == 1 ? FLASH_ADDRESS(PREFIX##_##NAME##_1_RLE) : \
+   frame == 2 ? FLASH_ADDRESS(PREFIX##_##NAME##_2_RLE) : FLASH_ADDRESS(PREFIX##_##NAME##_3_RLE))
+#define ANIMAL_ACTION_FRAME(PREFIX) \
+  ((action == SLEEP || action == OVERNIGHT) ? ACTION_FRAME(PREFIX, SLEEP) : \
+   action == WATER ? ACTION_FRAME(PREFIX, WATER) : ACTION_FRAME(PREFIX, FEED))
   switch (kind) {
     case DOG: return ANIMAL_ACTION_FRAME(DOG);
     case BUNNY: return ANIMAL_ACTION_FRAME(BUNNY);
@@ -596,9 +606,7 @@ void animalBitmapInfo(Animal kind, FlashAddress &bitmap, byte &width, byte &heig
 void animalPoseBitmapInfo(Animal kind, AnimalPose pose, FlashAddress &bitmap, byte &width, byte &height) {
   animalBitmapInfo(kind, bitmap, width, height);
 #define SET_ANIMAL_POSE(PREFIX) \
-  bitmap = pose == POSE_BLINK ? FLASH_ADDRESS(PREFIX##_BLINK_BITMAP) : \
-           pose == POSE_EAT ? FLASH_ADDRESS(PREFIX##_EAT_BITMAP) : \
-           pose == POSE_HAPPY ? FLASH_ADDRESS(PREFIX##_HAPPY_BITMAP) : \
+  bitmap = pose == POSE_HAPPY ? FLASH_ADDRESS(PREFIX##_HAPPY_BITMAP) : \
            pose == POSE_SLEEP ? FLASH_ADDRESS(PREFIX##_SLEEP_BITMAP) : FLASH_ADDRESS(PREFIX##_BITMAP)
   switch (kind) {
     case CAT: SET_ANIMAL_POSE(CAT); break;
@@ -660,20 +668,19 @@ void drawAnimal(int x, int y, Animal kind, byte pose) {
 AnimalPose actionAnimalPose(Action action, byte frame) {
   switch (action) {
     case FEED:
-      return frame == 0 ? POSE_IDLE : frame < 3 ? POSE_EAT : POSE_HAPPY;
     case WATER:
-      return frame == 0 ? POSE_IDLE : frame == 1 ? POSE_BLINK : frame == 2 ? POSE_IDLE : POSE_HAPPY;
+      return frame == 3 ? POSE_HAPPY : POSE_IDLE;
     case SLEEP:
     case OVERNIGHT:
-      return frame == 0 ? POSE_BLINK : POSE_SLEEP;
+      return POSE_SLEEP;
     case CLEAN:
     case MEDICINE:
     case LEARN:
-      return frame == 0 ? POSE_IDLE : frame == 1 ? POSE_BLINK : frame == 2 ? POSE_IDLE : POSE_HAPPY;
+      return frame == 1 ? POSE_SLEEP : frame == 3 ? POSE_HAPPY : POSE_IDLE;
     case PET_ACTION:
     case GROOM:
     case WASH:
-      return frame % 2 ? POSE_HAPPY : POSE_BLINK;
+      return frame % 2 ? POSE_HAPPY : POSE_SLEEP;
     default:
       return POSE_HAPPY;
   }
@@ -946,27 +953,14 @@ void drawScene() {
   if (animal == CAT) {
     drawRleBitmapScaled(1, 42, catActionFrame(sceneAction, sceneFrame % 4),
                         CAT_ACTION_SCENE_WIDTH, CAT_ACTION_SCENE_HEIGHT, 108);
-  } else if (sceneAction == FEED || sceneAction == WATER) {
-    drawSpanBitmap(8, 46, speciesActionFrame(animal, sceneAction, sceneFrame % 4), SPECIES_ACTION_SCENE_HEIGHT);
+  } else if (sceneAction == FEED || sceneAction == WATER || sceneAction == SLEEP || sceneAction == OVERNIGHT) {
+    drawRleBitmap(8, 46, speciesActionFrame(animal, sceneAction, sceneFrame % 4),
+                  SPECIES_ACTION_SCENE_WIDTH, SPECIES_ACTION_SCENE_HEIGHT);
   } else {
     int animalX = sceneAction == CLEAN || sceneAction == GROOM ? 83 :
                   sceneAction == WATER || sceneAction == MEDICINE || sceneAction == LEARN ? 116 : 100;
     drawAnimalPoseScaled(animalX, 116, animal, actionAnimalPose(sceneAction, sceneFrame), sceneFrame, 132);
     switch (sceneAction) {
-      case SLEEP:
-        display.setTextSize(2);
-        display.setCursor(148 + sceneFrame * 2, 78 - sceneFrame * 5);
-        display.print(F("Z"));
-        display.setCursor(164 + sceneFrame * 2, 62 - sceneFrame * 5);
-        display.print(F("Z"));
-        break;
-      case OVERNIGHT:
-        display.fillCircle(31, 80, 16, GxEPD_BLACK);
-        display.fillCircle(38, 73, 16, GxEPD_WHITE);
-        display.setTextSize(2);
-        display.setCursor(153, 66 - sceneFrame * 4);
-        display.print(F("Z"));
-        break;
       case CLEAN: {
         int x = 173 - sceneFrame * 5;
         display.drawLine(x, 73, x - 19, 137, GxEPD_BLACK);
@@ -1337,9 +1331,19 @@ void setup() {
   pinMode(RIGHT_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
   Serial.begin(9600);
+#ifdef WOKWI_SIM
+  Serial.println(F("Tamagotchi simulator boot"));
+#endif
   randomSeed(analogRead(A0));
+#if defined(ESP32)
+  EEPROM.begin(512);
+#endif
   display.init(115200);
   display.setRotation(0);
+#ifdef WOKWI_SIM
+  display.fillScreen(GxEPD_WHITE);
+  Serial.println(F("Display initialized"));
+#endif
   if (!loadGame()) {
     screen = LANGUAGE;
     editField = 0;
@@ -1352,6 +1356,9 @@ void setup() {
   startupSelectHeldSince = 0;
   eggSelectCount = 0;
   refreshDisplay();
+#ifdef WOKWI_SIM
+  Serial.println(F("First screen drawn"));
+#endif
 }
 
 void loop() {
