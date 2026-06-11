@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "1.54-inch E-Paper Display (SSD1675)",
+  "description": "Simulates a 1.54-inch 200x200 monochrome e-paper display (SSD1675 controller) for Wokwi. SPI pins only; pixel rendering uses the companion ILI9341 in diagram.json.",
+  "author": "Tamagotchi Project",
+  "license": "MIT",
+  "docs": "https://github.com/tamagotchi/epd-1in54-chip",
+  "pins": {
+    "CS":   { "description": "SPI Chip Select", "type": "input", "pull": "high" },
+    "DC":   { "description": "Data/Command select", "type": "input", "pull": "high" },
+    "RST":  { "description": "Reset (active low)", "type": "input", "pull": "high" },
+    "BUSY": { "description": "Busy output (high = busy)", "type": "output", "value": "low" },
+    "MOSI": { "description": "SPI Master Out Slave In", "type": "input" },
+    "SCK":  { "description": "SPI Clock", "type": "input" },
+    "VCC":  { "description": "Power supply (3.3V)", "type": "input", "pull": "low" },
+    "GND":  { "description": "Ground", "type": "input", "pull": "low" }
+  }
+}

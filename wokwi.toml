@@ -1,0 +1,4 @@
+[wokwi]
+version = 1
+firmware = ".wokwi-build/Tamagochi.ino.hex"
+elf = ".wokwi-build/Tamagochi.ino.elf"

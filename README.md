@@ -1,8 +1,12 @@
 # Arduino Tamagotchi
 
-A virtual pet for an Arduino Mega 2560 with a 1.54-inch e-paper screen. It has
+A small original companion game for an Arduino Mega 2560 with a 1.54-inch
+e-paper screen. It has
 an animated egg and hatch sequence, three original animal designs, care
 activities, music, two minigames, a clock/date setup, and EEPROM saves.
+
+At startup, choose English, Bulgarian, or German. The selected language is
+remembered, and Bulgarian text uses a proper Cyrillic display font.
 
 ## Parts
 
@@ -15,12 +19,30 @@ activities, music, two minigames, a clock/date setup, and EEPROM saves.
 The e-paper screen displays the pet, its age, and status bars. The built-in LED
 also lights while the pet is sleeping.
 
+The physical e-paper build uses partial refreshes for clock ticks, status
+changes, action-menu navigation, and egg movement. Screen transitions remain
+full refreshes, and a full cleanup refresh runs automatically after several
+partial updates to limit ghosting.
+
+During first-time setup, language changes, clock/date edits, and animal
+selection use partial refreshes where possible. The first screen and the final
+transition to the egg still use clean full refreshes.
+
+Clock/date Left and Right edits refresh only the number card. Confirming a
+field refreshes the heading, number, and instruction area. Hatch animation
+frames also use partial updates, followed by a clean full Home refresh.
+
+The onboarding screens use a restrained old-book design built on one measured
+layout: double border, symmetrical curled corner flourishes, centered chapter heading,
+diamond dividers, rectangular selection plates, and consistent baselines.
+
 ## Libraries
 
 Install these libraries using Arduino IDE's Library Manager:
 
 - `GxEPD2` by Jean-Marc Zingg
 - `Adafruit GFX Library` by Adafruit
+- `U8g2_for_Adafruit_GFX` by oliver
 
 ## Wiring
 
@@ -79,8 +101,9 @@ The egg periodically changes pose, followed by an animated musical hatch.
 
 ## Home Screen
 
-The top layout shows the clock, date, and care stats. The bottom layout is an
-icon carousel. Use Left and Right to choose an icon and Select to use it.
+The top layout shows the clock, date, and icon-based care meters for food,
+water, happiness, and energy. The bottom layout is an icon carousel. Use Left
+and Right to choose an icon and Select to use it.
 
 Available actions:
 
@@ -90,7 +113,10 @@ Available actions:
 - Clean poop and give medicine
 - Teach/learn
 - Pet, groom, and wash
-- Options: set clock, set date, or choose a new egg
+
+All care-action icons are visible together in the two-row footer. Only the
+selected action has a border. Press **Left and Right together** from Home to
+open Options for clock, date, or a new companion.
 
 Each care action has its own short e-paper animation and buzzer sound.
 
@@ -101,6 +127,29 @@ not include a real-time clock module. Time and hatch progress advance only
 while the Mega is powered. EEPROM stores the latest hourly state, but cannot
 measure time while power is disconnected. Add a DS3231 RTC module for a clock
 and hatch timer that continue while powered off.
+
+## Wokwi VS Code Simulation
+
+The repository includes `diagram.json` and `wokwi.toml`. Install the
+**Wokwi Simulator** VS Code extension, then:
+
+1. Run `.\build-wokwi.cmd` in the VS Code terminal.
+2. Press `F1`.
+3. Run **Wokwi: Start Simulator**.
+
+Wokwi uses a stock ILI9341 LCD as the preview screen, while the physical
+build continues to compile for the 1.54-inch e-paper display. The simulator
+still exercises the Mega firmware, buttons, buzzer, menus, and animations.
+
+On the egg screen, press **Select three times quickly** to hatch immediately.
+This shortcut is compiled only into the Wokwi simulation firmware.
+
+`diagram.json` also includes a `wokwi-ds3231` RTC module wired on I2C
+(Mega pins D20/SDA, D21/SCL). The RTC keeps simulation time moving while
+the project is paused or restarted in Wokwi.
+
+The original kawaii animal concept sheet used as a drawing reference is saved
+at `assets/kawaii-companion-concepts.png`.
 
 ## Different 1.54-Inch Panels
 

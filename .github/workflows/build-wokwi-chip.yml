@@ -1,0 +1,30 @@
+name: Build Wokwi Custom E-Paper Chip
+
+on:
+  push:
+    paths:
+      - 'chips/epd-1in54/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install wabt (wat2wasm)
+        run: |
+          wget https://github.com/WebAssembly/wabt/releases/download/1.0.39/wabt-1.0.39-ubuntu-24.04.tar.gz
+          tar xzf wabt-1.0.39-ubuntu-24.04.tar.gz
+          echo "$(pwd)/wabt-1.0.39/bin" >> $GITHUB_PATH
+      
+      - name: Build chip from WAT
+        run: |
+          cd chips/epd-1in54
+          make
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chip.wasm
+          path: chips/epd-1in54/dist/

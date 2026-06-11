@@ -12,6 +12,10 @@
 #include <Adafruit_GFX.h>
 #include <EEPROM.h>
 #include <GxEPD2_BW.h>
+#include "companion_bitmaps.h"
+#ifdef WOKWI_SIM
+#include <Adafruit_ILI9341.h>
+#endif
 
 const byte LEFT_PIN = 2;
 const byte SELECT_PIN = 3;
@@ -28,11 +32,29 @@ const unsigned long NEEDS_TICK_MS = 20UL * 60000UL;
 const unsigned long EGG_FRAME_MS = 15UL * 60000UL;
 const uint32_t SAVE_MAGIC = 0x54414D41UL;
 
+#ifdef WOKWI_SIM
+#define GxEPD_BLACK ILI9341_BLACK
+#define GxEPD_WHITE ILI9341_WHITE
+
+class WokwiDisplay : public Adafruit_ILI9341 {
+ public:
+  WokwiDisplay(byte cs, byte dc, byte rst) : Adafruit_ILI9341(cs, dc, rst) {}
+  void init(unsigned long) { begin(); }
+  void setFullWindow() {}
+  void setPartialWindow(uint16_t, uint16_t, uint16_t, uint16_t) {}
+  void firstPage() {}
+  bool nextPage() { return false; }
+  void hibernate() {}
+};
+
+WokwiDisplay display(EPD_CS_PIN, EPD_DC_PIN, EPD_RST_PIN);
+#else
 GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(
     GxEPD2_154_D67(EPD_CS_PIN, EPD_DC_PIN, EPD_RST_PIN, EPD_BUSY_PIN));
+#endif
 
-enum Screen : byte { SET_CLOCK, SET_DATE, SELECT_ANIMAL, EGG, HATCHING, HOME, ACTION_SCENE, GAME_MENU, OPTIONS };
-enum Animal : byte { CAT, DOG, BUNNY };
+enum Screen : byte { LANGUAGE, SET_CLOCK, SET_DATE, SELECT_ANIMAL, EGG, HATCHING, HOME, ACTION_SCENE, GAME_MENU, OPTIONS };
+enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, CHICKEN, PIG, ANIMAL_COUNT };
 enum Action : byte {
   FEED, WATER, PLAY, SLEEP, OVERNIGHT, CLEAN, MEDICINE,
   LEARN, PET_ACTION, GROOM, WASH, SETTINGS, ACTION_COUNT
@@ -97,6 +119,11 @@ unsigned long lastNeedsTick = 0;
 unsigned long lastEggFrame = 0;
 bool displayDirty = true;
 bool setupCreatesEgg = true;
+byte languageChoice = 0;
+bool startupShortcutArmed = true;
+unsigned long startupSelectHeldSince = 0;
+byte eggSelectCount = 0;
+unsigned long lastEggSelect = 0;
 
 byte clampStat(int value) {
   return constrain(value, 0, 100);
@@ -156,7 +183,7 @@ void saveGame(byte stage) {
 bool loadGame() {
   SaveData data;
   EEPROM.get(0, data);
-  if (data.magic != SAVE_MAGIC || data.animal > BUNNY || data.stage > HOME) {
+  if (data.magic != SAVE_MAGIC || data.animal >= ANIMAL_COUNT || data.stage > HOME) {
     return false;
   }
   gameClock = data.clock;
@@ -165,6 +192,20 @@ bool loadGame() {
   hatchMinutesLeft = data.hatchMinutesLeft;
   screen = data.stage == EGG ? EGG : HOME;
   return true;
+}
+
+const __FlashStringHelper *animalName(Animal kind) {
+  switch (kind) {
+    case CAT: return F("MICA");
+    case DOG: return F("PIP");
+    case BUNNY: return F("LUMA");
+    case PANDA: return F("PO");
+    case DRAGON: return F("EMBER");
+    case FOX: return F("FEN");
+    case CHICKEN: return F("PIPPI");
+    case PIG: return F("TRUFFLE");
+    default: return F("FRIEND");
+  }
 }
 
 void drawCentered(const __FlashStringHelper *text, int y, byte size = 1) {
@@ -176,21 +217,63 @@ void drawCentered(const __FlashStringHelper *text, int y, byte size = 1) {
   display.print(text);
 }
 
+void drawCenteredInBox(const __FlashStringHelper *text, int x, int y, int w, int h, byte size = 1) {
+  int16_t x1, y1;
+  uint16_t tw, th;
+  display.setTextSize(size);
+  display.getTextBounds(text, 0, 0, &x1, &y1, &tw, &th);
+  display.setCursor(x + (w - tw) / 2 - x1, y + (h - th) / 2 - y1);
+  display.print(text);
+}
+
+void drawScaledBitmap(int x, int y, const uint8_t *bitmap, int width, int height, int scalePercent) {
+  int bytesPerRow = (width + 7) / 8;
+  for (int sourceY = 0; sourceY < height; sourceY++) {
+    int outputY = y + sourceY * scalePercent / 100;
+    int outputBottom = y + (sourceY + 1) * scalePercent / 100;
+    int runStart = -1;
+    for (int sourceX = 0; sourceX <= width; sourceX++) {
+      bool black = false;
+      if (sourceX < width) {
+        uint8_t value = pgm_read_byte(bitmap + sourceY * bytesPerRow + sourceX / 8);
+        black = value & (0x80 >> (sourceX % 8));
+      }
+      if (black && runStart < 0) runStart = sourceX;
+      if (!black && runStart >= 0) {
+        int outputX = x + runStart * scalePercent / 100;
+        int outputRight = x + sourceX * scalePercent / 100;
+        display.fillRect(outputX, outputY, outputRight - outputX, outputBottom - outputY, GxEPD_BLACK);
+        runStart = -1;
+      }
+    }
+  }
+}
+
 void drawClock() {
+  display.fillRoundRect(3, 2, 194, 18, 8, GxEPD_BLACK);
+  display.setTextColor(GxEPD_WHITE);
   display.setTextSize(1);
-  display.setCursor(5, 5);
+  display.setCursor(8, 7);
   if (gameClock.hour < 10) display.print('0');
   display.print(gameClock.hour);
   display.print(':');
   if (gameClock.minute < 10) display.print('0');
   display.print(gameClock.minute);
-  display.setCursor(132, 5);
+  display.setCursor(122, 7);
   if (gameClock.day < 10) display.print('0');
   display.print(gameClock.day);
-  display.print('/');
+  display.print('.');
   if (gameClock.month < 10) display.print('0');
   display.print(gameClock.month);
-  display.drawLine(0, 16, 199, 16, GxEPD_BLACK);
+  display.print('.');
+  display.print(gameClock.year);
+  const __FlashStringHelper *name = animalName(animal);
+  int16_t x1, y1;
+  uint16_t nameWidth, nameHeight;
+  display.getTextBounds(name, 0, 7, &x1, &y1, &nameWidth, &nameHeight);
+  display.setCursor(100 - nameWidth / 2, 7);
+  display.print(name);
+  display.setTextColor(GxEPD_BLACK);
 }
 
 void drawHeart(int x, int y, bool filled = true) {
@@ -202,6 +285,101 @@ void drawHeart(int x, int y, bool filled = true) {
     display.drawCircle(x + 3, y + 3, 3, GxEPD_BLACK);
     display.drawCircle(x + 9, y + 3, 3, GxEPD_BLACK);
   }
+}
+
+void drawStatusIcon(byte icon, int x, int y) {
+  if (icon == 0) {
+    display.drawCircle(x + 8, y + 6, 5, GxEPD_BLACK);
+    display.drawCircle(x + 8, y + 6, 2, GxEPD_BLACK);
+    display.drawLine(x, y + 1, x, y + 11, GxEPD_BLACK);
+    display.drawLine(x + 2, y + 1, x + 2, y + 11, GxEPD_BLACK);
+  } else if (icon == 1) {
+    display.drawCircle(x + 8, y + 6, 4, GxEPD_BLACK);
+    display.fillTriangle(x + 8, y, x + 5, y + 6, x + 11, y + 6, GxEPD_BLACK);
+  } else if (icon == 2) {
+    drawHeart(x, y - 1);
+  } else {
+    display.fillTriangle(x + 8, y, x + 3, y + 7, x + 8, y + 7, GxEPD_BLACK);
+    display.fillTriangle(x + 7, y + 5, x + 12, y + 5, x + 5, y + 12, GxEPD_BLACK);
+  }
+}
+
+void drawMeter(int x, int y, int w, byte icon, int value) {
+  drawStatusIcon(icon, x, y - 2);
+  display.drawRoundRect(x + 18, y - 1, w - 18, 7, 3, GxEPD_BLACK);
+  display.fillRoundRect(x + 20, y + 1, map(value, 0, 100, 0, w - 22), 3, 1, GxEPD_BLACK);
+}
+
+void drawBookCorner(int x, int y, int sx, int sy) {
+  display.drawLine(x, y, x + sx * 20, y, GxEPD_BLACK);
+  display.drawLine(x, y, x, y + sy * 20, GxEPD_BLACK);
+  display.drawCircle(x + sx * 12, y + sy * 12, 8, GxEPD_BLACK);
+  display.drawCircle(x + sx * 12, y + sy * 12, 4, GxEPD_BLACK);
+  display.fillCircle(x + sx * 12, y + sy * 12, 1, GxEPD_BLACK);
+  display.fillEllipse(x + sx * 23, y + sy * 5, 5, 2, GxEPD_BLACK);
+  display.fillEllipse(x + sx * 5, y + sy * 23, 2, 5, GxEPD_BLACK);
+  display.drawLine(x + sx * 18, y + sy * 8, x + sx * 26, y + sy * 4, GxEPD_BLACK);
+  display.drawLine(x + sx * 8, y + sy * 18, x + sx * 4, y + sy * 26, GxEPD_BLACK);
+}
+
+void drawBookFrame() {
+  display.drawRect(4, 4, 192, 192, GxEPD_BLACK);
+  display.drawRect(8, 8, 184, 184, GxEPD_BLACK);
+  drawBookCorner(12, 12, 1, 1);
+  drawBookCorner(188, 12, -1, 1);
+  drawBookCorner(12, 188, 1, -1);
+  drawBookCorner(188, 188, -1, -1);
+}
+
+void drawSetupFrame() {
+  display.drawRoundRect(2, 2, 196, 196, 12, GxEPD_BLACK);
+  display.drawRoundRect(6, 6, 188, 188, 10, GxEPD_BLACK);
+  display.fillCircle(15, 15, 2, GxEPD_BLACK);
+  display.fillCircle(185, 15, 2, GxEPD_BLACK);
+  display.fillCircle(15, 185, 2, GxEPD_BLACK);
+  display.fillCircle(185, 185, 2, GxEPD_BLACK);
+}
+
+void drawSetupArrows(int y) {
+  display.fillTriangle(24, y, 34, y - 7, 34, y + 7, GxEPD_BLACK);
+  display.fillTriangle(176, y, 166, y - 7, 166, y + 7, GxEPD_BLACK);
+  display.drawCircle(100, y, 5, GxEPD_BLACK);
+  display.fillCircle(100, y, 2, GxEPD_BLACK);
+}
+
+void drawBookDivider(int y) {
+  display.drawLine(38, y, 82, y, GxEPD_BLACK);
+  display.drawLine(118, y, 162, y, GxEPD_BLACK);
+  display.fillTriangle(91, y, 100, y - 5, 109, y, GxEPD_BLACK);
+  display.fillTriangle(91, y, 100, y + 5, 109, y, GxEPD_BLACK);
+  display.fillCircle(100, y, 2, GxEPD_WHITE);
+}
+
+void drawBookHeading(const __FlashStringHelper *title, const __FlashStringHelper *subtitle) {
+  drawBookFrame();
+  drawCentered(title, 58, 2);
+  drawBookDivider(68);
+  drawCentered(subtitle, 90);
+}
+
+void drawBookChoice(int x, int y, int w, int h, const __FlashStringHelper *label, bool selected) {
+  if (selected) {
+    display.fillRoundRect(x, y, w, h, 8, GxEPD_BLACK);
+    display.setTextColor(GxEPD_WHITE);
+  } else {
+    display.drawRoundRect(x, y, w, h, 8, GxEPD_BLACK);
+    display.setTextColor(GxEPD_BLACK);
+  }
+  drawCenteredInBox(label, x, y, w, h, h >= 34 ? 2 : 1);
+  display.setTextColor(GxEPD_BLACK);
+}
+
+void drawLanguageScreen() {
+  drawSetupFrame();
+  drawBookChoice(15, 78, 50, 44, F("EN"), languageChoice == 0);
+  drawBookChoice(75, 78, 50, 44, F("BG"), languageChoice == 1);
+  drawBookChoice(135, 78, 50, 44, F("DE"), languageChoice == 2);
+  drawSetupArrows(164);
 }
 
 void drawVirus(int x, int y) {
@@ -221,64 +399,291 @@ void drawVirus(int x, int y) {
 }
 
 void drawEgg(int x, int y, byte frame) {
+  int lean = frame == 1 ? -4 : frame == 2 ? 4 : 0;
+  display.drawBitmap(x - EGG_WIDTH / 2 + lean, y - EGG_HEIGHT / 2, EGG_BITMAP, EGG_WIDTH, EGG_HEIGHT, GxEPD_BLACK);
+  display.drawLine(x - 16 + lean, y - 29, x - 9 + lean, y - 23, GxEPD_BLACK);
+  display.drawLine(x - 11 + lean, y - 21, x - 4 + lean, y - 17, GxEPD_BLACK);
+  display.drawLine(x + 7 + lean, y - 28, x + 13 + lean, y - 22, GxEPD_BLACK);
+  display.drawLine(x + 11 + lean, y - 16, x + 17 + lean, y - 11, GxEPD_BLACK);
+  display.drawLine(x - 17 + lean, y + 9, x - 10 + lean, y + 15, GxEPD_BLACK);
+  display.drawLine(x + 14 + lean, y + 6, x + 20 + lean, y + 11, GxEPD_BLACK);
+  if (frame >= 1) {
+    display.drawLine(x - 20 + lean, y - 3, x - 13 + lean, y + 1, GxEPD_BLACK);
+    display.drawLine(x + 17 + lean, y - 4, x + 11 + lean, y + 1, GxEPD_BLACK);
+    display.drawLine(x - 6 + lean, y + 18, x - 1 + lean, y + 11, GxEPD_BLACK);
+    display.drawLine(x + 4 + lean, y + 15, x + 8 + lean, y + 20, GxEPD_BLACK);
+  }
+  if (frame >= 2) {
+    display.drawLine(x - 18 + lean, y + 17, x - 12 + lean, y + 11, GxEPD_BLACK);
+    display.drawLine(x + 15 + lean, y + 15, x + 20 + lean, y + 9, GxEPD_BLACK);
+    display.fillTriangle(x - 3 + lean, y + 10, x + 1 + lean, y + 6, x + 4 + lean, y + 13, GxEPD_BLACK);
+  }
+}
+
+void drawEggScaled(int x, int y, byte frame, int scalePercent) {
   int lean = frame == 1 ? -5 : frame == 2 ? 5 : 0;
-  display.fillEllipse(x + lean, y, 29, 37, GxEPD_BLACK);
-  display.fillEllipse(x + lean, y, 25, 33, GxEPD_WHITE);
-  display.fillTriangle(x - 18 + lean, y + 5, x - 6 + lean, y - 3, x + 2 + lean, y + 6, GxEPD_BLACK);
-  display.fillTriangle(x + 1 + lean, y + 6, x + 10 + lean, y - 3, x + 18 + lean, y + 7, GxEPD_BLACK);
+  int scaledWidth = EGG_WIDTH * scalePercent / 100;
+  int scaledHeight = EGG_HEIGHT * scalePercent / 100;
+  drawScaledBitmap(x - scaledWidth / 2 + lean, y - scaledHeight / 2,
+                   EGG_BITMAP, EGG_WIDTH, EGG_HEIGHT, scalePercent);
+  if (frame >= 1) {
+    display.drawLine(x - 22 + lean, y - 8, x - 12 + lean, y - 1, GxEPD_BLACK);
+    display.drawLine(x - 12 + lean, y - 1, x - 19 + lean, y + 8, GxEPD_BLACK);
+    display.drawLine(x + 19 + lean, y - 13, x + 10 + lean, y - 5, GxEPD_BLACK);
+  }
+  if (frame >= 2) {
+    display.drawLine(x + 10 + lean, y - 5, x + 20 + lean, y + 5, GxEPD_BLACK);
+    display.drawLine(x - 5 + lean, y + 15, x + 2 + lean, y + 5, GxEPD_BLACK);
+  }
+}
+
+void drawRleBitmap(int x, int y, const uint8_t *rle, uint16_t width, uint16_t height) {
+  uint16_t px = 0;
+  uint16_t py = 0;
+  bool black = false;
+  uint32_t index = 0;
+  while (py < height) {
+    uint8_t run = pgm_read_byte(rle + index++);
+    if (run == 0) {
+      black = !black;
+      continue;
+    }
+    while (run > 0 && py < height) {
+      uint16_t chunk = run < (width - px) ? run : (width - px);
+      if (black) {
+        display.fillRect(x + px, y + py, chunk, 1, GxEPD_BLACK);
+      }
+      px += chunk;
+      run -= chunk;
+      if (px >= width) {
+        px = 0;
+        py++;
+      }
+    }
+    black = !black;
+  }
+}
+
+void drawRleBitmapScaled(int x, int y, const uint8_t *rle, uint16_t width, uint16_t height, int scalePercent) {
+  uint16_t px = 0;
+  uint16_t py = 0;
+  bool black = false;
+  uint32_t index = 0;
+  while (py < height) {
+    uint8_t run = pgm_read_byte(rle + index++);
+    if (run == 0) {
+      black = !black;
+      continue;
+    }
+    while (run > 0 && py < height) {
+      uint16_t chunk = run < (width - px) ? run : (width - px);
+      if (black) {
+        int outputX = x + px * scalePercent / 100;
+        int outputY = y + py * scalePercent / 100;
+        int outputRight = x + (px + chunk) * scalePercent / 100;
+        int outputBottom = y + (py + 1) * scalePercent / 100;
+        display.fillRect(outputX, outputY, outputRight - outputX, outputBottom - outputY, GxEPD_BLACK);
+      }
+      px += chunk;
+      run -= chunk;
+      if (px >= width) {
+        px = 0;
+        py++;
+      }
+    }
+    black = !black;
+  }
+}
+
+const uint8_t *catActionFrame(Action action, byte frame) {
+  switch (action) {
+    case FEED:
+      return frame == 0 ? CAT_FEED_0_RLE : frame == 1 ? CAT_FEED_1_RLE : frame == 2 ? CAT_FEED_2_RLE : CAT_FEED_3_RLE;
+    case WATER:
+      return frame == 0 ? CAT_WATER_0_RLE : frame == 1 ? CAT_WATER_1_RLE : frame == 2 ? CAT_WATER_2_RLE : CAT_WATER_3_RLE;
+    case SLEEP:
+      return frame == 0 ? CAT_SLEEP_0_RLE : frame == 1 ? CAT_SLEEP_1_RLE : frame == 2 ? CAT_SLEEP_2_RLE : CAT_SLEEP_3_RLE;
+    case CLEAN:
+      return frame == 0 ? CAT_CLEAN_0_RLE : frame == 1 ? CAT_CLEAN_1_RLE : frame == 2 ? CAT_CLEAN_2_RLE : CAT_CLEAN_3_RLE;
+    case MEDICINE:
+      return frame == 0 ? CAT_MEDICINE_0_RLE : frame == 1 ? CAT_MEDICINE_1_RLE : frame == 2 ? CAT_MEDICINE_2_RLE : CAT_MEDICINE_3_RLE;
+    case LEARN:
+      return frame == 0 ? CAT_LEARN_0_RLE : frame == 1 ? CAT_LEARN_1_RLE : frame == 2 ? CAT_LEARN_2_RLE : CAT_LEARN_3_RLE;
+    case PET_ACTION:
+      return frame == 0 ? CAT_PET_0_RLE : frame == 1 ? CAT_PET_1_RLE : frame == 2 ? CAT_PET_2_RLE : CAT_PET_3_RLE;
+    case GROOM:
+      return frame == 0 ? CAT_GROOM_0_RLE : frame == 1 ? CAT_GROOM_1_RLE : frame == 2 ? CAT_GROOM_2_RLE : CAT_GROOM_3_RLE;
+    case WASH:
+      return frame == 0 ? CAT_WASH_0_RLE : frame == 1 ? CAT_WASH_1_RLE : frame == 2 ? CAT_WASH_2_RLE : CAT_WASH_3_RLE;
+    default:
+      return CAT_FEED_0_RLE;
+  }
+}
+
+void animalBitmapInfo(Animal kind, const uint8_t *&bitmap, byte &width, byte &height) {
+  bitmap = CAT_BITMAP;
+  width = CAT_WIDTH;
+  height = CAT_HEIGHT;
+  switch (kind) {
+    case CAT: bitmap = CAT_BITMAP; width = CAT_WIDTH; height = CAT_HEIGHT; break;
+    case DOG: bitmap = DOG_BITMAP; width = DOG_WIDTH; height = DOG_HEIGHT; break;
+    case BUNNY: bitmap = BUNNY_BITMAP; width = BUNNY_WIDTH; height = BUNNY_HEIGHT; break;
+    case PANDA: bitmap = PANDA_BITMAP; width = PANDA_WIDTH; height = PANDA_HEIGHT; break;
+    case DRAGON: bitmap = DRAGON_BITMAP; width = DRAGON_WIDTH; height = DRAGON_HEIGHT; break;
+    case FOX: bitmap = FOX_BITMAP; width = FOX_WIDTH; height = FOX_HEIGHT; break;
+    case CHICKEN: bitmap = CHICKEN_BITMAP; width = CHICKEN_WIDTH; height = CHICKEN_HEIGHT; break;
+    case PIG: bitmap = PIG_BITMAP; width = PIG_WIDTH; height = PIG_HEIGHT; break;
+    default: break;
+  }
+}
+
+void drawAnimalScaled(int x, int y, Animal kind, byte pose, int scalePercent) {
+  int bounce = pose % 2 ? -3 : 0;
+  const uint8_t *bitmap;
+  byte width;
+  byte height;
+  animalBitmapInfo(kind, bitmap, width, height);
+  int scaledWidth = width * scalePercent / 100;
+  int scaledHeight = height * scalePercent / 100;
+  drawScaledBitmap(x - scaledWidth / 2, y + bounce - scaledHeight / 2, bitmap, width, height, scalePercent);
 }
 
 void drawAnimal(int x, int y, Animal kind, byte pose) {
   int bounce = pose % 2 ? -3 : 0;
-  y += bounce;
-  if (kind == CAT) {
-    display.fillTriangle(x - 25, y - 23, x - 9, y - 36, x - 6, y - 17, GxEPD_BLACK);
-    display.fillTriangle(x + 25, y - 23, x + 9, y - 36, x + 6, y - 17, GxEPD_BLACK);
-  } else if (kind == DOG) {
-    display.fillRoundRect(x - 31, y - 27, 14, 29, 6, GxEPD_BLACK);
-    display.fillRoundRect(x + 17, y - 27, 14, 29, 6, GxEPD_BLACK);
-  } else {
-    display.fillRoundRect(x - 19, y - 51, 13, 35, 6, GxEPD_BLACK);
-    display.fillRoundRect(x + 6, y - 51, 13, 35, 6, GxEPD_BLACK);
-  }
-  display.fillCircle(x, y, 29, GxEPD_BLACK);
-  display.fillCircle(x, y, 25, GxEPD_WHITE);
+  int top = y + bounce;
+  const uint8_t *bitmap;
+  byte width;
+  byte height;
+  animalBitmapInfo(kind, bitmap, width, height);
+  display.drawBitmap(x - width / 2, top - height / 2, bitmap, width, height, GxEPD_BLACK);
   if (pet.sleeping) {
-    display.drawLine(x - 14, y - 5, x - 5, y - 5, GxEPD_BLACK);
-    display.drawLine(x + 5, y - 5, x + 14, y - 5, GxEPD_BLACK);
-  } else {
-    display.fillCircle(x - 10, y - 6, 3, GxEPD_BLACK);
-    display.fillCircle(x + 10, y - 6, 3, GxEPD_BLACK);
+    display.setTextSize(1);
+    display.setCursor(x + 25, top - 34);
+    display.print(F("Z"));
+    display.setCursor(x + 31, top - 28);
+    display.print(F("Z"));
+    display.setCursor(x + 37, top - 22);
+    display.print(F("Z"));
   }
-  if (kind == DOG) display.fillCircle(x, y + 4, 4, GxEPD_BLACK);
-  else {
-    display.drawLine(x - 3, y + 2, x, y + 5, GxEPD_BLACK);
-    display.drawLine(x + 3, y + 2, x, y + 5, GxEPD_BLACK);
-  }
-  display.drawLine(x, y + 6, x - 7, y + 11, GxEPD_BLACK);
-  display.drawLine(x, y + 6, x + 7, y + 11, GxEPD_BLACK);
-  display.fillRoundRect(x - 21, y + 28, 42, 32, 14, GxEPD_BLACK);
-  display.fillRect(x - 17, y + 30, 34, 22, GxEPD_WHITE);
-  display.fillRoundRect(x - 24, y + 48, 19, 10, 4, GxEPD_BLACK);
-  display.fillRoundRect(x + 5, y + 48, 19, 10, 4, GxEPD_BLACK);
 }
 
 void drawActionIcon(Action action, int x, int y, bool selected) {
-  if (selected) display.drawRoundRect(x - 3, y - 3, 42, 37, 5, GxEPD_BLACK);
-  int cx = x + 18;
+  if (selected) display.drawRoundRect(x - 1, y - 1, 28, 24, 6, GxEPD_BLACK);
   switch (action) {
-    case FEED: display.fillTriangle(cx, y + 3, x + 5, y + 26, x + 31, y + 26, GxEPD_BLACK); break;
-    case WATER: display.fillCircle(cx, y + 20, 8, GxEPD_BLACK); display.fillTriangle(cx, y + 1, x + 10, y + 20, x + 26, y + 20, GxEPD_BLACK); break;
-    case PLAY: display.drawCircle(cx, y + 15, 11, GxEPD_BLACK); display.drawLine(x + 8, y + 15, x + 28, y + 15, GxEPD_BLACK); break;
-    case SLEEP: display.fillCircle(cx, y + 14, 12, GxEPD_BLACK); display.fillCircle(cx + 6, y + 9, 12, GxEPD_WHITE); break;
-    case OVERNIGHT: display.fillCircle(x + 10, y + 11, 7, GxEPD_BLACK); display.drawLine(x + 22, y + 6, x + 31, y + 6, GxEPD_BLACK); display.drawLine(x + 22, y + 13, x + 29, y + 13, GxEPD_BLACK); break;
-    case CLEAN: display.fillRect(x + 8, y + 10, 20, 16, GxEPD_BLACK); display.drawLine(x + 6, y + 7, x + 30, y + 7, GxEPD_BLACK); break;
-    case MEDICINE: display.drawRoundRect(x + 7, y + 5, 22, 20, 6, GxEPD_BLACK); display.drawLine(cx, y + 6, cx, y + 24, GxEPD_BLACK); break;
-    case LEARN: display.drawRect(x + 5, y + 5, 13, 21, GxEPD_BLACK); display.drawRect(x + 18, y + 5, 13, 21, GxEPD_BLACK); break;
-    case PET_ACTION: drawHeart(x + 11, y + 8); break;
-    case GROOM: display.drawLine(x + 8, y + 6, x + 27, y + 25, GxEPD_BLACK); display.drawLine(x + 12, y + 4, x + 31, y + 23, GxEPD_BLACK); break;
-    case WASH: display.drawCircle(cx, y + 16, 11, GxEPD_BLACK); display.drawCircle(x + 7, y + 7, 3, GxEPD_BLACK); break;
-    case SETTINGS: display.drawCircle(cx, y + 15, 10, GxEPD_BLACK); display.fillCircle(cx, y + 15, 3, GxEPD_BLACK); break;
+    case FEED:
+      display.drawEllipse(x + 13, y + 12, 7, 4, GxEPD_BLACK);
+      display.drawEllipse(x + 13, y + 12, 3, 2, GxEPD_BLACK);
+      display.drawLine(x + 3, y + 6, x + 3, y + 19, GxEPD_BLACK);
+      display.drawLine(x + 1, y + 6, x + 1, y + 10, GxEPD_BLACK);
+      display.drawLine(x + 5, y + 6, x + 5, y + 10, GxEPD_BLACK);
+      display.drawCircle(x + 23, y + 8, 2, GxEPD_BLACK);
+      display.drawLine(x + 23, y + 10, x + 23, y + 19, GxEPD_BLACK);
+      break;
+    case WATER:
+      display.fillCircle(x + 13, y + 14, 6, GxEPD_BLACK);
+      display.fillTriangle(x + 13, y + 3, x + 7, y + 14, x + 19, y + 14, GxEPD_BLACK);
+      display.fillCircle(x + 11, y + 12, 1, GxEPD_WHITE);
+      break;
+    case PLAY:
+      display.drawLine(x + 5, y + 8, x + 13, y + 4, GxEPD_BLACK);
+      display.drawLine(x + 13, y + 4, x + 22, y + 8, GxEPD_BLACK);
+      display.drawLine(x + 22, y + 8, x + 14, y + 12, GxEPD_BLACK);
+      display.drawLine(x + 14, y + 12, x + 5, y + 8, GxEPD_BLACK);
+      display.drawLine(x + 5, y + 8, x + 5, y + 17, GxEPD_BLACK);
+      display.drawLine(x + 5, y + 17, x + 14, y + 21, GxEPD_BLACK);
+      display.drawLine(x + 14, y + 21, x + 14, y + 12, GxEPD_BLACK);
+      display.drawLine(x + 22, y + 8, x + 22, y + 17, GxEPD_BLACK);
+      display.drawLine(x + 22, y + 17, x + 14, y + 21, GxEPD_BLACK);
+      display.fillCircle(x + 13, y + 8, 1, GxEPD_BLACK);
+      display.fillCircle(x + 9, y + 13, 1, GxEPD_BLACK);
+      display.fillCircle(x + 10, y + 17, 1, GxEPD_BLACK);
+      display.fillCircle(x + 18, y + 13, 1, GxEPD_BLACK);
+      display.fillCircle(x + 18, y + 17, 1, GxEPD_BLACK);
+      break;
+    case SLEEP:
+      display.fillCircle(x + 10, y + 12, 7, GxEPD_BLACK);
+      display.fillCircle(x + 14, y + 9, 7, GxEPD_WHITE);
+      display.setTextSize(1);
+      display.setCursor(x + 18, y + 3);
+      display.print(F("Z"));
+      display.setCursor(x + 21, y + 8);
+      display.print(F("Z"));
+      display.setCursor(x + 24, y + 13);
+      display.print(F("Z"));
+      break;
+    case OVERNIGHT:
+      display.drawCircle(x + 10, y + 12, 7, GxEPD_BLACK);
+      display.fillCircle(x + 10, y + 12, 1, GxEPD_BLACK);
+      display.drawLine(x + 10, y + 12, x + 10, y + 7, GxEPD_BLACK);
+      display.drawLine(x + 10, y + 12, x + 14, y + 14, GxEPD_BLACK);
+      display.setTextSize(1);
+      display.setCursor(x + 18, y + 4);
+      display.print(F("Z"));
+      display.setCursor(x + 21, y + 9);
+      display.print(F("Z"));
+      break;
+    case CLEAN:
+      display.drawLine(x + 6, y + 3, x + 18, y + 16, GxEPD_BLACK);
+      display.drawLine(x + 8, y + 2, x + 20, y + 15, GxEPD_BLACK);
+      display.drawLine(x + 6, y + 3, x + 8, y + 2, GxEPD_BLACK);
+      display.fillTriangle(x + 17, y + 14, x + 25, y + 19, x + 13, y + 22, GxEPD_BLACK);
+      display.drawLine(x + 16, y + 17, x + 21, y + 20, GxEPD_WHITE);
+      display.drawLine(x + 15, y + 19, x + 18, y + 21, GxEPD_WHITE);
+      break;
+    case MEDICINE:
+      display.drawCircle(x + 8, y + 17, 4, GxEPD_BLACK);
+      display.drawCircle(x + 19, y + 7, 4, GxEPD_BLACK);
+      display.drawLine(x + 5, y + 14, x + 16, y + 4, GxEPD_BLACK);
+      display.drawLine(x + 11, y + 20, x + 22, y + 10, GxEPD_BLACK);
+      display.drawLine(x + 10, y + 13, x + 15, y + 9, GxEPD_BLACK);
+      display.fillCircle(x + 8, y + 17, 3, GxEPD_BLACK);
+      break;
+    case LEARN:
+      display.drawLine(x + 3, y + 7, x + 13, y + 4, GxEPD_BLACK);
+      display.drawLine(x + 13, y + 4, x + 23, y + 7, GxEPD_BLACK);
+      display.drawLine(x + 3, y + 7, x + 3, y + 18, GxEPD_BLACK);
+      display.drawLine(x + 23, y + 7, x + 23, y + 18, GxEPD_BLACK);
+      display.drawLine(x + 3, y + 18, x + 13, y + 21, GxEPD_BLACK);
+      display.drawLine(x + 13, y + 21, x + 23, y + 18, GxEPD_BLACK);
+      display.drawLine(x + 13, y + 4, x + 13, y + 21, GxEPD_BLACK);
+      display.drawLine(x + 6, y + 10, x + 11, y + 9, GxEPD_BLACK);
+      display.drawLine(x + 15, y + 9, x + 20, y + 10, GxEPD_BLACK);
+      display.drawLine(x + 6, y + 14, x + 11, y + 14, GxEPD_BLACK);
+      display.drawLine(x + 15, y + 14, x + 20, y + 14, GxEPD_BLACK);
+      break;
+    case PET_ACTION:
+      display.drawCircle(x + 13, y + 15, 6, GxEPD_BLACK);
+      display.fillTriangle(x + 8, y + 11, x + 8, y + 5, x + 13, y + 10, GxEPD_BLACK);
+      display.fillTriangle(x + 18, y + 11, x + 18, y + 5, x + 13, y + 10, GxEPD_BLACK);
+      display.fillCircle(x + 11, y + 15, 1, GxEPD_BLACK);
+      display.fillCircle(x + 16, y + 15, 1, GxEPD_BLACK);
+      display.drawLine(x + 5, y + 5, x + 12, y + 2, GxEPD_BLACK);
+      display.drawLine(x + 12, y + 2, x + 22, y + 5, GxEPD_BLACK);
+      display.drawLine(x + 7, y + 7, x + 15, y + 4, GxEPD_BLACK);
+      display.drawLine(x + 15, y + 4, x + 22, y + 6, GxEPD_BLACK);
+      break;
+    case GROOM:
+      display.drawEllipse(x + 11, y + 8, 8, 4, GxEPD_BLACK);
+      display.drawLine(x + 18, y + 10, x + 24, y + 17, GxEPD_BLACK);
+      display.drawLine(x + 5, y + 11, x + 5, y + 18, GxEPD_BLACK);
+      display.drawLine(x + 8, y + 12, x + 8, y + 20, GxEPD_BLACK);
+      display.drawLine(x + 11, y + 12, x + 11, y + 20, GxEPD_BLACK);
+      display.drawLine(x + 14, y + 12, x + 14, y + 19, GxEPD_BLACK);
+      display.drawLine(x + 17, y + 11, x + 17, y + 17, GxEPD_BLACK);
+      break;
+    case WASH:
+      display.drawLine(x + 3, y + 4, x + 10, y + 4, GxEPD_BLACK);
+      display.drawLine(x + 3, y + 4, x + 2, y + 10, GxEPD_BLACK);
+      display.drawLine(x + 10, y + 4, x + 15, y + 9, GxEPD_BLACK);
+      display.drawEllipse(x + 15, y + 10, 5, 3, GxEPD_BLACK);
+      display.fillCircle(x + 14, y + 15, 1, GxEPD_BLACK);
+      display.fillCircle(x + 18, y + 17, 1, GxEPD_BLACK);
+      display.fillCircle(x + 22, y + 19, 1, GxEPD_BLACK);
+      break;
+    case SETTINGS:
+      display.drawCircle(x + 13, y + 11, 6, GxEPD_BLACK);
+      display.fillCircle(x + 13, y + 11, 2, GxEPD_BLACK);
+      break;
     default: break;
   }
 }
@@ -303,129 +708,117 @@ void printActionName(Action action) {
 
 void drawHome() {
   drawClock();
-  display.setTextSize(1);
-  display.setCursor(5, 21);
-  display.print(F("F")); display.print(pet.food);
-  display.setCursor(43, 21);
-  display.print(F("W")); display.print(pet.water);
-  display.setCursor(83, 21);
-  display.print(F("H")); display.print(pet.happy);
-  display.setCursor(125, 21);
-  display.print(F("E")); display.print(pet.energy);
-  display.setCursor(164, 21);
-  display.print(F("+")); display.print(pet.health);
-  drawAnimal(100, 83, animal, gameClock.minute);
+  drawMeter(5, 28, 90, 0, pet.food);
+  drawMeter(5, 42, 90, 1, pet.water);
+  drawMeter(105, 28, 90, 2, pet.happy);
+  drawMeter(105, 42, 90, 3, pet.energy);
+  drawAnimal(100, 96, animal, gameClock.minute);
   if (pet.poop) {
-    display.fillCircle(156, 121, 7, GxEPD_BLACK);
-    display.fillTriangle(149, 121, 156, 108, 163, 121, GxEPD_BLACK);
+    display.fillCircle(164, 132, 7, GxEPD_BLACK);
+    display.fillTriangle(157, 132, 164, 120, 171, 132, GxEPD_BLACK);
   }
   if (pet.sick) {
-    drawVirus(38, 71);
+    drawVirus(28, 96);
   }
   if (pet.dirty) {
-    display.drawLine(149, 68, 158, 60, GxEPD_BLACK);
-    display.drawLine(158, 68, 167, 60, GxEPD_BLACK);
-    display.drawLine(167, 68, 176, 60, GxEPD_BLACK);
+    display.drawLine(151, 88, 160, 80, GxEPD_BLACK);
+    display.drawLine(161, 88, 170, 80, GxEPD_BLACK);
+    display.drawLine(171, 88, 180, 80, GxEPD_BLACK);
   }
-  display.drawLine(0, 143, 199, 143, GxEPD_BLACK);
-  Action previous = (Action)((selectedAction + ACTION_COUNT - 1) % ACTION_COUNT);
-  Action next = (Action)((selectedAction + 1) % ACTION_COUNT);
-  drawActionIcon(previous, 10, 151, false);
-  drawActionIcon(selectedAction, 81, 149, true);
-  drawActionIcon(next, 152, 151, false);
-  display.setTextSize(1);
-  display.setCursor(80, 190);
-  printActionName(selectedAction);
+  for (byte i = 0; i < SETTINGS; i++) {
+    int x = i < 6 ? 4 + i * 32 : 20 + (i - 6) * 36;
+    int y = i < 6 ? 146 : 172;
+    drawActionIcon((Action)i, x, y, selectedAction == i);
+  }
 }
 
 void drawSetupNumber(const __FlashStringHelper *title, int value, const __FlashStringHelper *hint) {
-  drawCentered(title, 24, 2);
-  display.drawRoundRect(51, 68, 98, 58, 8, GxEPD_BLACK);
+  drawSetupFrame();
+  drawCentered(title, 30, 2);
+  drawBookDivider(54);
+  display.drawRoundRect(55, 70, 90, 72, 14, GxEPD_BLACK);
   display.setTextSize(value > 99 ? 3 : 4);
-  display.setCursor(value > 99 ? 64 : value < 10 ? 86 : 72, value > 99 ? 87 : 82);
+  display.setCursor(value > 99 ? 64 : value < 10 ? 84 : 70, value > 99 ? 101 : 96);
   if (value < 10) display.print('0');
   display.print(value);
-  drawCentered(hint, 153);
-  drawCentered(F("< CHANGE   SELECT   CHANGE >"), 180);
+  drawSetupArrows(174);
 }
 
 void drawSetupScreen() {
   if (screen == SET_CLOCK) {
     drawSetupNumber(editField == 0 ? F("SET HOUR") : F("SET MINUTE"),
                     editField == 0 ? gameClock.hour : gameClock.minute,
-                    editField == 0 ? F("Select confirms hour") : F("Select continues to date"));
+                    F(""));
   } else if (screen == SET_DATE) {
-    if (editField == 0) drawSetupNumber(F("SET DAY"), gameClock.day, F("Select confirms day"));
-    else if (editField == 1) drawSetupNumber(F("SET MONTH"), gameClock.month, F("Select confirms month"));
-    else drawSetupNumber(F("SET YEAR"), gameClock.year, F("Select chooses animal"));
+    if (editField == 0) drawSetupNumber(F("SET DAY"), gameClock.day, F(""));
+    else if (editField == 1) drawSetupNumber(F("SET MONTH"), gameClock.month, F(""));
+    else drawSetupNumber(F("SET YEAR"), gameClock.year, F(""));
   } else {
-    drawCentered(F("SELECT ANIMAL"), 20, 2);
-    drawAnimal(100, 94, (Animal)animalChoice, 0);
-    drawCentered(animalChoice == CAT ? F("CAT") : animalChoice == DOG ? F("DOG") : F("BUNNY"), 165, 2);
-    drawCentered(F("< CHANGE   SELECT   CHANGE >"), 190);
+    drawSetupFrame();
+    drawAnimalScaled(100, 78, (Animal)animalChoice, 0, 130);
+    display.fillRoundRect(58, 164, 84, 24, 10, GxEPD_BLACK);
+    display.setTextColor(GxEPD_WHITE);
+    drawCenteredInBox(animalName((Animal)animalChoice), 58, 164, 84, 24, 1);
+    display.setTextColor(GxEPD_BLACK);
+    display.fillTriangle(16, 100, 28, 92, 28, 108, GxEPD_BLACK);
+    display.fillTriangle(184, 100, 172, 92, 172, 108, GxEPD_BLACK);
   }
 }
 
 void drawEggScreen() {
-  drawClock();
-  drawCentered(F("A NEW FRIEND IS COMING"), 28);
-  drawEgg(100, 92, eggFrame);
-  display.setTextSize(1);
-  display.setCursor(56, 145);
-  display.print(F("Hatches in about"));
-  display.setTextSize(2);
-  display.setCursor(63, 160);
-  display.print((hatchMinutesLeft + 59) / 60);
-  display.print(F(" hour"));
-  if (hatchMinutesLeft > 60) display.print('s');
-  drawCentered(F("Keep the Mega powered"), 187);
+  drawEggScaled(100, 103, eggFrame, 130);
 }
 
 void drawScene() {
   drawClock();
-  drawAnimal(100, 83, animal, sceneFrame);
-  display.setTextSize(2);
-  display.setCursor(70, 158);
-  printActionName(sceneAction);
-  drawCentered(F("SELECT to return"), 188);
-  switch (sceneAction) {
-    case FEED: display.fillTriangle(38 + sceneFrame * 5, 83, 18 + sceneFrame * 5, 115, 58 + sceneFrame * 5, 115, GxEPD_BLACK); break;
-    case WATER: display.fillCircle(35 + sceneFrame * 6, 104, 12, GxEPD_BLACK); display.fillTriangle(35 + sceneFrame * 6, 72, 22 + sceneFrame * 6, 105, 48 + sceneFrame * 6, 105, GxEPD_BLACK); break;
-    case SLEEP: display.setTextSize(2); display.setCursor(142 + sceneFrame * 5, 57 - sceneFrame * 6); display.print(F("Zz")); break;
-    case OVERNIGHT: display.fillCircle(35, 75, 17, GxEPD_BLACK); display.fillCircle(42 + sceneFrame * 3, 69, 17, GxEPD_WHITE); break;
-    case CLEAN: display.drawLine(145 - sceneFrame * 8, 70, 170 - sceneFrame * 8, 116, GxEPD_BLACK); display.fillTriangle(158 - sceneFrame * 8, 104, 177 - sceneFrame * 8, 114, 149 - sceneFrame * 8, 121, GxEPD_BLACK); break;
-    case MEDICINE: display.drawRoundRect(145 - sceneFrame * 7, 82, 35, 17, 8, GxEPD_BLACK); display.drawLine(162 - sceneFrame * 7, 83, 162 - sceneFrame * 7, 98, GxEPD_BLACK); drawVirus(35, 76); break;
-    case LEARN: display.drawRect(20, 68 - sceneFrame * 3, 44, 48, GxEPD_BLACK); display.drawLine(42, 68 - sceneFrame * 3, 42, 116 - sceneFrame * 3, GxEPD_BLACK); break;
-    case PET_ACTION: drawHeart(28, 76 - sceneFrame * 8); drawHeart(155, 62 + sceneFrame * 5); break;
-    case GROOM: display.drawLine(25 + sceneFrame * 8, 68, 60 + sceneFrame * 8, 116, GxEPD_BLACK); display.drawLine(32 + sceneFrame * 8, 63, 67 + sceneFrame * 8, 111, GxEPD_BLACK); break;
-    case WASH: for (byte i = 0; i < 6; i++) display.drawCircle(25 + i * 27, 60 + ((i + sceneFrame) % 2) * 16, 7, GxEPD_BLACK); break;
-    default: break;
+  if (animal == CAT) {
+    drawRleBitmapScaled(1, 42, catActionFrame(sceneAction, sceneFrame % 4),
+                        CAT_ACTION_SCENE_WIDTH, CAT_ACTION_SCENE_HEIGHT, 108);
+  } else {
+    drawAnimalScaled(100, 116, animal, sceneFrame, 145);
+    switch (sceneAction) {
+      case FEED: display.drawRoundRect(32 + sceneFrame * 5, 124, 30, 11, 5, GxEPD_BLACK); display.fillCircle(40 + sceneFrame * 5, 122, 2, GxEPD_BLACK); break;
+      case WATER: display.drawCircle(42 + sceneFrame * 4, 120, 10, GxEPD_BLACK); display.fillTriangle(42 + sceneFrame * 4, 88, 29 + sceneFrame * 4, 120, 55 + sceneFrame * 4, 120, GxEPD_BLACK); break;
+      case SLEEP: display.setTextSize(2); display.setCursor(148 + sceneFrame * 3, 74 - sceneFrame * 5); display.print(F("ZZZ")); break;
+      case OVERNIGHT: display.drawCircle(38, 90, 14, GxEPD_BLACK); display.fillCircle(38, 90, 1, GxEPD_BLACK); break;
+      case CLEAN: display.drawLine(150 - sceneFrame * 6, 84, 172 - sceneFrame * 6, 132, GxEPD_BLACK); display.fillTriangle(161 - sceneFrame * 6, 120, 178 - sceneFrame * 6, 113, 154 - sceneFrame * 6, 136, GxEPD_BLACK); break;
+      case MEDICINE: display.drawRoundRect(150 - sceneFrame * 5, 98, 28, 12, 6, GxEPD_BLACK); display.drawLine(164 - sceneFrame * 5, 99, 164 - sceneFrame * 5, 109, GxEPD_BLACK); drawVirus(38, 92); break;
+      case LEARN: display.drawRect(20, 84 - sceneFrame * 3, 42, 46, GxEPD_BLACK); display.drawLine(41, 84 - sceneFrame * 3, 41, 130 - sceneFrame * 3, GxEPD_BLACK); break;
+      case PET_ACTION: drawHeart(28, 92 - sceneFrame * 6); drawHeart(155, 78 + sceneFrame * 4); break;
+      case GROOM: display.drawLine(25 + sceneFrame * 7, 84, 60 + sceneFrame * 7, 130, GxEPD_BLACK); display.drawLine(32 + sceneFrame * 7, 79, 67 + sceneFrame * 7, 125, GxEPD_BLACK); break;
+      case WASH: for (byte i = 0; i < 5; i++) display.drawCircle(30 + i * 30, 76 + ((i + sceneFrame) % 2) * 14, 6, GxEPD_BLACK); break;
+      default: break;
+    }
   }
 }
 
 void drawGameMenu() {
-  drawCentered(F("CHOOSE A GAME"), 25, 2);
-  display.drawRoundRect(17, 65, 166, 38, 6, GxEPD_BLACK);
-  display.drawRoundRect(17, 115, 166, 38, 6, GxEPD_BLACK);
+  drawBookHeading(F("CHOOSE A GAME"), F("SELECT ONE"));
+  display.drawRoundRect(18, 84, 164, 34, 8, GxEPD_BLACK);
+  display.drawRoundRect(18, 128, 164, 34, 8, GxEPD_BLACK);
   display.setTextSize(2);
-  display.setCursor(42, 77);
+  display.setCursor(43, 96);
   display.print(F("GUESS SIDE"));
-  display.setCursor(54, 127);
+  display.setCursor(55, 140);
   display.print(F("STOP BAR"));
-  display.drawRect(20, gameChoice == 0 ? 68 : 118, 8, 30, GxEPD_BLACK);
-  drawCentered(F("< choose   SELECT play   choose >"), 181);
+  display.drawRect(21, gameChoice == 0 ? 87 : 131, 8, 28, GxEPD_BLACK);
+  display.setTextSize(1);
+  display.setCursor(36, 181);
+  display.print(F("< choose   SELECT play   choose >"));
 }
 
 void drawOptions() {
-  drawCentered(F("OPTIONS"), 22, 2);
+  drawBookHeading(F("OPTIONS"), F("SELECT WHAT TO CHANGE"));
   display.setTextSize(2);
-  display.setCursor(45, 68);
+  display.setCursor(34, 84);
   display.print(editField == 0 ? F("> SET CLOCK") : F("  SET CLOCK"));
-  display.setCursor(45, 103);
+  display.setCursor(34, 118);
   display.print(editField == 1 ? F("> SET DATE") : F("  SET DATE"));
-  display.setCursor(45, 138);
+  display.setCursor(34, 152);
   display.print(editField == 2 ? F("> NEW EGG") : F("  NEW EGG"));
-  drawCentered(F("< move   SELECT   move >"), 184);
+  display.setTextSize(1);
+  display.setCursor(40, 181);
+  display.print(F("< move   SELECT   move >"));
 }
 
 void refreshDisplay() {
@@ -434,7 +827,8 @@ void refreshDisplay() {
   do {
     display.fillScreen(GxEPD_WHITE);
     display.setTextColor(GxEPD_BLACK);
-    if (screen == SET_CLOCK || screen == SET_DATE || screen == SELECT_ANIMAL) drawSetupScreen();
+    if (screen == LANGUAGE) drawLanguageScreen();
+    else if (screen == SET_CLOCK || screen == SET_DATE || screen == SELECT_ANIMAL) drawSetupScreen();
     else if (screen == EGG) drawEggScreen();
     else if (screen == HOME) drawHome();
     else if (screen == ACTION_SCENE) drawScene();
@@ -448,12 +842,12 @@ void refreshDisplay() {
 void animateAction(Action action) {
   sceneAction = action;
   screen = ACTION_SCENE;
-  for (sceneFrame = 0; sceneFrame < 2; sceneFrame++) {
+  for (sceneFrame = 0; sceneFrame < 4; sceneFrame++) {
     refreshDisplay();
     chirp(650 + sceneFrame * 180, 70);
-    delay(180);
+    delay(160);
   }
-  sceneFrame = 1;
+  sceneFrame = 3;
 }
 
 void animateEggHatch() {
@@ -463,16 +857,12 @@ void animateEggHatch() {
     display.firstPage();
     do {
       display.fillScreen(GxEPD_WHITE);
-      drawCentered(frame < 3 ? F("CRACK...") : F("HELLO!"), 24, 2);
       if (frame < 3) {
-        drawEgg(100, 100, frame);
-        for (byte i = 0; i < frame + 1; i++) {
-          display.drawLine(92 + i * 8, 74 + i * 7, 101 + i * 5, 85 + i * 8, GxEPD_BLACK);
-        }
+        drawEggScaled(100, 103, frame, 130);
       } else {
-        drawAnimal(100, 95, animal, 1);
-        drawHeart(36, 64);
-        drawHeart(153, 72);
+        drawAnimalScaled(100, 96, animal, 1, 130);
+        drawHeart(24, 54);
+        drawHeart(164, 62);
       }
     } while (display.nextPage());
     chirp(500 + frame * 180, 160);
@@ -620,7 +1010,9 @@ void performAction(Action action) {
 }
 
 void changeSetupValue(int direction) {
-  if (screen == SET_CLOCK) {
+  if (screen == LANGUAGE) {
+    languageChoice = (languageChoice + 3 + direction) % 3;
+  } else if (screen == SET_CLOCK) {
     if (editField == 0) gameClock.hour = (gameClock.hour + 24 + direction) % 24;
     else gameClock.minute = (gameClock.minute + 60 + direction) % 60;
   } else if (screen == SET_DATE) {
@@ -630,12 +1022,23 @@ void changeSetupValue(int direction) {
       gameClock.day = min(gameClock.day, daysInMonth(gameClock.month, gameClock.year));
     } else gameClock.year = constrain(gameClock.year + direction, 2024, 2099);
   } else if (screen == SELECT_ANIMAL) {
-    animalChoice = (animalChoice + 3 + direction) % 3;
+    animalChoice = (animalChoice + ANIMAL_COUNT + direction) % ANIMAL_COUNT;
   }
   displayDirty = true;
 }
 
 void handleButtons(bool left, bool select, bool right) {
+  if (screen == LANGUAGE) {
+    if (left) changeSetupValue(-1);
+    if (right) changeSetupValue(1);
+    if (select) {
+      screen = SET_CLOCK;
+      editField = 0;
+      setupCreatesEgg = true;
+      displayDirty = true;
+    }
+    return;
+  }
   if (screen == SET_CLOCK || screen == SET_DATE || screen == SELECT_ANIMAL) {
     if (left) changeSetupValue(-1);
     if (right) changeSetupValue(1);
@@ -656,9 +1059,24 @@ void handleButtons(bool left, bool select, bool right) {
     }
     return;
   }
+  if (screen == EGG) {
+    if (select) {
+      unsigned long now = millis();
+      if (now - lastEggSelect > 700) eggSelectCount = 0;
+      lastEggSelect = now;
+      eggSelectCount++;
+      if (eggSelectCount >= 3) {
+        eggSelectCount = 0;
+        hatchMinutesLeft = 0;
+        animateEggHatch();
+        return;
+      }
+    }
+    return;
+  }
   if (screen == HOME) {
-    if (left) selectedAction = (Action)((selectedAction + ACTION_COUNT - 1) % ACTION_COUNT);
-    if (right) selectedAction = (Action)((selectedAction + 1) % ACTION_COUNT);
+    if (left) selectedAction = (Action)((selectedAction + SETTINGS - 1) % SETTINGS);
+    if (right) selectedAction = (Action)((selectedAction + 1) % SETTINGS);
     if (select) performAction(selectedAction);
     if (left || right) { chirp(900, 25); displayDirty = true; }
   } else if (screen == ACTION_SCENE && select) {
@@ -695,17 +1113,42 @@ void setup() {
   display.init(115200);
   display.setRotation(0);
   if (!loadGame()) {
-    screen = SET_CLOCK;
+    screen = LANGUAGE;
     editField = 0;
     setupCreatesEgg = true;
   }
   lastClockTick = millis();
   lastNeedsTick = millis();
   lastEggFrame = millis();
+  startupShortcutArmed = true;
+  startupSelectHeldSince = 0;
+  eggSelectCount = 0;
   refreshDisplay();
 }
 
 void loop() {
+  if (startupShortcutArmed && (screen == LANGUAGE || screen == SET_CLOCK)) {
+    if (digitalRead(SELECT_PIN) == LOW) {
+      if (startupSelectHeldSince == 0) startupSelectHeldSince = millis();
+      if (millis() - startupSelectHeldSince >= 1000UL) {
+        startupShortcutArmed = false;
+        startupSelectHeldSince = 0;
+        animalChoice = animal;
+        editField = 0;
+        screen = SELECT_ANIMAL;
+        displayDirty = true;
+        refreshDisplay();
+        return;
+      }
+      return;
+    } else if (startupSelectHeldSince != 0) {
+      startupShortcutArmed = false;
+      startupSelectHeldSince = 0;
+      handleButtons(false, true, false);
+      return;
+    }
+  }
+
   bool left = pressed(leftButton);
   bool select = pressed(selectButton);
   bool right = pressed(rightButton);

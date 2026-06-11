@@ -1,5 +1,7 @@
 # Arduino build output
 build/
+.arduino-build/
+.wokwi-build/
 *.hex
 *.elf
 *.bin
@@ -7,3 +9,7 @@ build/
 # Editor settings
 .vscode/
 .idea/
+
+# Wokwi custom chip build output
+chips/*/dist/
+
