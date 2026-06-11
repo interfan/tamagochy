@@ -8,7 +8,7 @@ if (-not (Test-Path $cli)) {
 $projectRoot = $PSScriptRoot
 $buildPath = Join-Path $projectRoot ".wokwi-build"
 $elfPath = Join-Path $buildPath "Tamagochi.ino.elf"
-$flasherArgsPath = Join-Path $buildPath "flasher_args.json"
+$firmwarePath = Join-Path $buildPath "Tamagochi.ino.bin"
 $nrfFlashBudget = 1MB
 
 Push-Location $projectRoot
@@ -22,22 +22,9 @@ try {
   if ($LASTEXITCODE -ne 0) {
     throw "Wokwi ESP32 firmware build failed."
   }
-
-  $flashFiles = [ordered]@{
-    "0x1000"  = "Tamagochi.ino.bootloader.bin"
-    "0x8000"  = "Tamagochi.ino.partitions.bin"
-    "0xe000"  = "boot_app0.bin"
-    "0x10000" = "Tamagochi.ino.bin"
+  if (-not (Test-Path $firmwarePath)) {
+    throw "The Arduino ESP32 firmware required by Wokwi was not generated."
   }
-  foreach ($filename in $flashFiles.Values) {
-    if (-not (Test-Path (Join-Path $buildPath $filename))) {
-      throw "Required ESP32 flash image was not generated: $filename"
-    }
-  }
-  @{
-    flash_settings = @{ flash_size = "4MB" }
-    flash_files = $flashFiles
-  } | ConvertTo-Json -Depth 4 | Set-Content -Path $flasherArgsPath -Encoding ascii
 
   $sizeTool = Get-ChildItem "$env:LOCALAPPDATA\Arduino15\packages\esp32\tools" `
     -Recurse -Filter xtensa-esp32-elf-size.exe |

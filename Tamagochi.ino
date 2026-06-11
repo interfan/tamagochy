@@ -35,7 +35,7 @@ const byte LEFT_PIN = 25;
 const byte SELECT_PIN = 26;
 const byte RIGHT_PIN = 27;
 const byte BUZZER_PIN = 32;
-const byte EPD_CS_PIN = 5;
+const byte EPD_CS_PIN = 15;
 const byte EPD_DC_PIN = 2;
 const byte EPD_RST_PIN = 4;
 const byte EPD_BUSY_PIN = 33;
@@ -63,10 +63,7 @@ const uint32_t SAVE_MAGIC = 0x54414D41UL;
 class WokwiDisplay : public Adafruit_ILI9341 {
  public:
   WokwiDisplay(byte cs, byte dc, byte rst) : Adafruit_ILI9341(cs, dc, rst) {}
-  void init(unsigned long) {
-    SPI.begin(18, 19, 23, EPD_CS_PIN);
-    begin(20000000);
-  }
+  void init(unsigned long) { begin(); }
   void setFullWindow() {}
   void setPartialWindow(uint16_t, uint16_t, uint16_t, uint16_t) {}
   void firstPage() {}
@@ -1340,10 +1337,6 @@ void setup() {
 #endif
   display.init(115200);
   display.setRotation(0);
-#ifdef WOKWI_SIM
-  display.fillScreen(GxEPD_WHITE);
-  Serial.println(F("Display initialized"));
-#endif
   if (!loadGame()) {
     screen = LANGUAGE;
     editField = 0;
@@ -1356,9 +1349,6 @@ void setup() {
   startupSelectHeldSince = 0;
   eggSelectCount = 0;
   refreshDisplay();
-#ifdef WOKWI_SIM
-  Serial.println(F("First screen drawn"));
-#endif
 }
 
 void loop() {

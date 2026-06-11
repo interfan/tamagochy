@@ -1,4 +1,4 @@
 [wokwi]
 version = 1
-firmware = ".wokwi-build/flasher_args.json"
+firmware = ".wokwi-build/Tamagochi.ino.bin"
 elf = ".wokwi-build/Tamagochi.ino.elf"

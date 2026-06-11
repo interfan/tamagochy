@@ -3,8 +3,8 @@
   "author": "Tamagotchi",
   "editor": "wokwi",
   "parts": [
-    { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 55, "left": 15, "attrs": {} },
-    { "type": "wokwi-ili9341", "id": "screen", "top": -250, "left": 235, "attrs": { "width": "200", "height": "200" } },
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 55, "left": 15, "attrs": {} },
+    { "type": "wokwi-ili9341", "id": "screen", "top": -250, "left": 235, "attrs": {} },
     { "type": "wokwi-ds3231", "id": "rtc", "top": 300, "left": 400, "attrs": {} },
     { "type": "wokwi-pushbutton", "id": "left", "top": -195, "left": 125, "attrs": { "color": "green", "label": "LEFT" } },
     { "type": "wokwi-pushbutton", "id": "select", "top": -95, "left": 125, "attrs": { "color": "blue", "label": "SELECT" } },
@@ -13,15 +13,14 @@
     { "type": "wokwi-text", "id": "note", "top": 480, "left": 35, "attrs": { "text": "ESP32 preview target - nRF52840 1 MiB budget enforced by build" } }
   ],
   "connections": [
-    [ "screen:VCC", "esp:3V3", "red", [] ],
+    [ "screen:VCC", "esp:5V", "red", [] ],
     [ "screen:GND", "esp:GND.1", "black", [] ],
     [ "screen:MOSI", "esp:23", "green", [] ],
     [ "screen:SCK", "esp:18", "green", [] ],
     [ "screen:MISO", "esp:19", "green", [] ],
-    [ "screen:CS", "esp:5", "orange", [] ],
+    [ "screen:CS", "esp:15", "orange", [] ],
     [ "screen:D/C", "esp:2", "blue", [] ],
     [ "screen:RST", "esp:4", "purple", [] ],
-    [ "screen:LED", "esp:3V3", "red", [] ],
     [ "left:1.l", "esp:25", "green", [] ],
     [ "left:2.l", "esp:GND.1", "black", [] ],
     [ "select:1.l", "esp:26", "blue", [] ],
