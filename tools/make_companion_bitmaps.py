@@ -28,11 +28,11 @@ SPECS = {
     },
     "dog": {
         "crop": (585, 155, 1145, 770), "width": 96, "height": 100, "threshold": 158,
-        "eyes": [(39, 46), (57, 46)], "mouth": (48, 59),
+        "eyes": [(41, 44), (65, 43)], "mouth": (54, 58),
     },
     "bunny": {
         "crop": (1190, 130, 1745, 770), "width": 96, "height": 100, "threshold": 165,
-        "eyes": [(42, 43), (58, 43)], "mouth": (50, 55),
+        "eyes": [(46, 51), (69, 50)], "mouth": (58, 63),
     },
 }
 NEW_COMPANION_SPECS = {
@@ -344,14 +344,6 @@ def happy_pose(bitmap: Image.Image, spec: dict, animal: str) -> Image.Image:
         draw.arc((2, 45, 27, 70), 80, 285, fill=0, width=2)
         draw.arc((7, 50, 22, 65), 80, 285, fill=0, width=1)
         draw.line((22, 64, 31, 72), fill=0, width=2)
-    elif animal == "dog":
-        draw.rectangle((77, 48, 95, 76), fill=255)
-        draw.line((76, 63, 91, 48), fill=0, width=2)
-        draw.line((91, 48, 86, 61), fill=0, width=2)
-        draw.line((86, 61, 95, 62), fill=0, width=2)
-        draw.line((95, 62, 79, 72), fill=0, width=2)
-    elif animal == "bunny":
-        draw.ellipse((76, 60, 94, 78), outline=0, width=2)
     return pose
 
 
@@ -364,8 +356,61 @@ def sleep_pose(bitmap: Image.Image, spec: dict) -> Image.Image:
     return pose
 
 
-def append_companion(output: list[str], image: Image.Image, name: str, spec: dict) -> None:
-    bitmap = prepare_bitmap(image, spec)
+def prepare_companion_from_scene(scene: Image.Image, width: int, height: int) -> Image.Image:
+    source = scene.convert("L").point(lambda value: 0 if value < 180 else 255)
+    pixels = source.load()
+    seen = bytearray(source.width * source.height)
+    components = []
+    for y in range(source.height):
+        for x in range(source.width):
+            index = y * source.width + x
+            if pixels[x, y] != 0 or seen[index]:
+                continue
+            stack = [(x, y)]
+            seen[index] = 1
+            points = []
+            while stack:
+                px, py = stack.pop()
+                points.append((px, py))
+                for nx, ny in ((px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)):
+                    if not (0 <= nx < source.width and 0 <= ny < source.height):
+                        continue
+                    neighbor = ny * source.width + nx
+                    if pixels[nx, ny] == 0 and not seen[neighbor]:
+                        seen[neighbor] = 1
+                        stack.append((nx, ny))
+            components.append(points)
+
+    body = max(components, key=len)
+    body_box = (
+        min(x for x, y in body),
+        min(y for x, y in body),
+        max(x for x, y in body) + 1,
+        max(y for x, y in body) + 1,
+    )
+    animal = Image.new("L", source.size, 255)
+    animal_pixels = animal.load()
+    for component in components:
+        box = (
+            min(x for x, y in component),
+            min(y for x, y in component),
+            max(x for x, y in component) + 1,
+            max(y for x, y in component) + 1,
+        )
+        if (body_box[0] <= box[0] and body_box[1] <= box[1] and
+                box[2] <= body_box[2] and box[3] <= body_box[3]):
+            for x, y in component:
+                animal_pixels[x, y] = 0
+
+    animal = animal.crop(body_box)
+    animal.thumbnail((width - 2, height - 2), Image.Resampling.LANCZOS)
+    animal = animal.point(lambda value: 0 if value < 180 else 255)
+    canvas = Image.new("L", (width, height), 255)
+    canvas.paste(animal, ((width - animal.width) // 2, height - animal.height - 1))
+    return canvas
+
+
+def append_prepared_companion(output: list[str], bitmap: Image.Image, name: str, spec: dict) -> None:
     bitmap.save(PREVIEW_DIR / f"{name}.png")
     prefix = name.upper()
     output.append(f"const uint8_t {prefix}_WIDTH = {spec['width']};")
@@ -383,6 +428,10 @@ def append_companion(output: list[str], image: Image.Image, name: str, spec: dic
             f"{prefix}_{pose_name}_BITMAP",
             encode_bitmap(pose, spec["width"], spec["height"]),
         ))
+
+
+def append_companion(output: list[str], image: Image.Image, name: str, spec: dict) -> None:
+    append_prepared_companion(output, prepare_bitmap(image, spec), name, spec)
 
 
 def format_array(name: str, values: list[int]) -> str:
@@ -445,8 +494,24 @@ def main() -> None:
         "",
     ]
 
+    species_feed_sheet = Image.open(SPECIES_FEED_COMPANIONS_SOURCE)
+    canonical_scene_companions = {
+        "dog": prepare_companion_from_scene(
+            prepare_grid_action_frames(species_feed_sheet, 0, 6)[0],
+            SPECS["dog"]["width"],
+            SPECS["dog"]["height"],
+        ),
+        "bunny": prepare_companion_from_scene(
+            prepare_grid_action_frames(species_feed_sheet, 1, 6)[0],
+            SPECS["bunny"]["width"],
+            SPECS["bunny"]["height"],
+        ),
+    }
     for name, spec in SPECS.items():
-        append_companion(output, image, name, spec)
+        if name in canonical_scene_companions:
+            append_prepared_companion(output, canonical_scene_companions[name], name, spec)
+        else:
+            append_companion(output, image, name, spec)
 
     for name, spec in NEW_COMPANION_SPECS.items():
         append_companion(output, new_companions, name, spec)

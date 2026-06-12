@@ -3,7 +3,7 @@
 A small original companion game for an Arduino Mega 2560 with a 1.54-inch
 e-paper screen. It has
 an animated egg and hatch sequence, ten original animal designs, care
-activities, music, two minigames, a clock/date setup, and EEPROM saves.
+activities, music, two minigames, a clock setup, and EEPROM saves.
 
 At startup, choose English, Bulgarian, or German. The selected language is
 remembered, and Bulgarian text uses a proper Cyrillic display font.
@@ -24,11 +24,11 @@ changes, action-menu navigation, and egg movement. Screen transitions remain
 full refreshes, and a full cleanup refresh runs automatically after several
 partial updates to limit ghosting.
 
-During first-time setup, language changes, clock/date edits, and animal
+During first-time setup, language changes, clock edits, and animal
 selection use partial refreshes where possible. The first screen and the final
 transition to the egg still use clean full refreshes.
 
-Clock/date Left and Right edits refresh only the number card. Confirming a
+Clock Left and Right edits refresh only the number card. Confirming a
 field refreshes the heading, number, and instruction area. Hatch animation
 frames also use partial updates, followed by a clean full Home refresh.
 
@@ -95,15 +95,15 @@ Use `3.3V` unless your particular module explicitly states that it accepts
 
 ## First Start
 
-Set the time, set the date, and choose a cat, dog, bunny, panda, dragon, fox,
+Set the time and choose a cat, dog, bunny, panda, dragon, fox,
 chicken, pig, hamster, or penguin. An egg then appears and hatches after a
 random **2 to 5 hours** while the Mega is powered. The egg periodically changes
 pose, followed by an animated musical hatch.
 
 ## Home Screen
 
-The top layout shows the clock, date, and icon-based care meters for food,
-water, happiness, and energy. The bottom layout is an icon carousel. Use Left
+The top layout shows icon-based care meters for food, water, happiness, and
+energy. The bottom layout is an icon carousel. Use Left
 and Right to choose an icon and Select to use it.
 
 Available actions:
@@ -112,12 +112,12 @@ Available actions:
 - Play: `Guess Side` and `Stop Bar` minigames
 - Nap and overnight sleep
 - Clean poop and give medicine
-- Teach/learn
-- Pet, groom, and wash
+- Read
+- Pet, groom, and bath
 
 All care-action icons are visible together in the two-row footer. Only the
 selected action has a border. Press **Left and Right together** from Home to
-open Options for clock, date, or a new companion.
+open Options for the clock or a new companion.
 
 Each care action has its own short e-paper animation and buzzer sound. Every
 animal has idle, blink, eating, happy, and sleeping artwork. The cat also uses
@@ -126,8 +126,9 @@ with species-specific food: bone, carrot, bamboo, meat, grain, apple, seeds,
 or fish. They also have full drinking scenes with species-sized bowls and
 details such as the dragon's stone basin and penguin's ice-rimmed dish. Their
 sleep and overnight actions reuse species-specific scenes: nest, cave, igloo,
-burrow, hammock, mud puddle, or pet bed. Their remaining care scenes use
-individual motion accents and clean shared props.
+burrow, hammock, mud puddle, or pet bed. Medicine, pet, groom, clean, bath,
+and read also use four-frame species scenes with a unique motif for every
+animal.
 
 ## Clock Limitation
 

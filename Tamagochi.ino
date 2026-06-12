@@ -13,6 +13,8 @@
 #include <Adafruit_GFX.h>
 #include <EEPROM.h>
 #include "companion_bitmaps.h"
+#include "action_icons.h"
+#include "species_action_bitmaps.h"
 #ifdef WOKWI_SIM
 #include <SPI.h>
 #include <Adafruit_ILI9341.h>
@@ -77,7 +79,10 @@ GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(
     GxEPD2_154_D67(EPD_CS_PIN, EPD_DC_PIN, EPD_RST_PIN, EPD_BUSY_PIN));
 #endif
 
-enum Screen : byte { LANGUAGE, SET_CLOCK, SET_DATE, SELECT_ANIMAL, EGG, HATCHING, HOME, ACTION_SCENE, GAME_MENU, OPTIONS };
+enum Screen : byte {
+  LANGUAGE = 0, SET_CLOCK = 1, SELECT_ANIMAL = 3, EGG = 4, HATCHING = 5,
+  HOME = 6, ACTION_SCENE = 7, GAME_MENU = 8, OPTIONS = 9
+};
 enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, CHICKEN, PIG, HAMSTER, PENGUIN, ANIMAL_COUNT };
 enum AnimalPose : byte { POSE_IDLE, POSE_HAPPY, POSE_SLEEP };
 enum Action : byte {
@@ -564,7 +569,13 @@ FlashAddress speciesActionFrame(Animal kind, Action action, byte frame) {
    frame == 2 ? FLASH_ADDRESS(PREFIX##_##NAME##_2_RLE) : FLASH_ADDRESS(PREFIX##_##NAME##_3_RLE))
 #define ANIMAL_ACTION_FRAME(PREFIX) \
   ((action == SLEEP || action == OVERNIGHT) ? ACTION_FRAME(PREFIX, SLEEP) : \
-   action == WATER ? ACTION_FRAME(PREFIX, WATER) : ACTION_FRAME(PREFIX, FEED))
+   action == WATER ? ACTION_FRAME(PREFIX, WATER) : \
+   action == CLEAN ? ACTION_FRAME(PREFIX, CLEAN) : \
+   action == MEDICINE ? ACTION_FRAME(PREFIX, MEDICINE) : \
+   action == LEARN ? ACTION_FRAME(PREFIX, LEARN) : \
+   action == PET_ACTION ? ACTION_FRAME(PREFIX, PET) : \
+   action == GROOM ? ACTION_FRAME(PREFIX, GROOM) : \
+   action == WASH ? ACTION_FRAME(PREFIX, WASH) : ACTION_FRAME(PREFIX, FEED))
   switch (kind) {
     case DOG: return ANIMAL_ACTION_FRAME(DOG);
     case BUNNY: return ANIMAL_ACTION_FRAME(BUNNY);
@@ -632,17 +643,6 @@ void drawAnimalScaled(int x, int y, Animal kind, byte pose, int scalePercent) {
   drawScaledBitmap(x - scaledWidth / 2, y + bounce - scaledHeight / 2, bitmap, width, height, scalePercent);
 }
 
-void drawAnimalPoseScaled(int x, int y, Animal kind, AnimalPose animalPose, byte frame, int scalePercent) {
-  int bounce = frame % 2 ? -3 : 0;
-  FlashAddress bitmap;
-  byte width;
-  byte height;
-  animalPoseBitmapInfo(kind, animalPose, bitmap, width, height);
-  int scaledWidth = width * scalePercent / 100;
-  int scaledHeight = height * scalePercent / 100;
-  drawScaledBitmap(x - scaledWidth / 2, y + bounce - scaledHeight / 2, bitmap, width, height, scalePercent);
-}
-
 void drawAnimal(int x, int y, Animal kind, byte pose) {
   int bounce = pose % 2 ? -3 : 0;
   int top = y + bounce;
@@ -662,146 +662,25 @@ void drawAnimal(int x, int y, Animal kind, byte pose) {
   }
 }
 
-AnimalPose actionAnimalPose(Action action, byte frame) {
-  switch (action) {
-    case FEED:
-    case WATER:
-      return frame == 3 ? POSE_HAPPY : POSE_IDLE;
-    case SLEEP:
-    case OVERNIGHT:
-      return POSE_SLEEP;
-    case CLEAN:
-    case MEDICINE:
-    case LEARN:
-      return frame == 1 ? POSE_SLEEP : frame == 3 ? POSE_HAPPY : POSE_IDLE;
-    case PET_ACTION:
-    case GROOM:
-    case WASH:
-      return frame % 2 ? POSE_HAPPY : POSE_SLEEP;
-    default:
-      return POSE_HAPPY;
-  }
-}
-
 void drawActionIcon(Action action, int x, int y, bool selected) {
-  if (selected) display.drawRoundRect(x - 1, y - 1, 28, 24, 6, GxEPD_BLACK);
+  if (selected) display.drawRoundRect(x - 2, y - 2, 32, 28, 6, GxEPD_BLACK);
+  FlashAddress bitmap;
   switch (action) {
-    case FEED:
-      display.drawEllipse(x + 13, y + 12, 7, 4, GxEPD_BLACK);
-      display.drawEllipse(x + 13, y + 12, 3, 2, GxEPD_BLACK);
-      display.drawLine(x + 3, y + 6, x + 3, y + 19, GxEPD_BLACK);
-      display.drawLine(x + 1, y + 6, x + 1, y + 10, GxEPD_BLACK);
-      display.drawLine(x + 5, y + 6, x + 5, y + 10, GxEPD_BLACK);
-      display.drawCircle(x + 23, y + 8, 2, GxEPD_BLACK);
-      display.drawLine(x + 23, y + 10, x + 23, y + 19, GxEPD_BLACK);
-      break;
-    case WATER:
-      display.fillCircle(x + 13, y + 14, 6, GxEPD_BLACK);
-      display.fillTriangle(x + 13, y + 3, x + 7, y + 14, x + 19, y + 14, GxEPD_BLACK);
-      display.fillCircle(x + 11, y + 12, 1, GxEPD_WHITE);
-      break;
-    case PLAY:
-      display.drawLine(x + 5, y + 8, x + 13, y + 4, GxEPD_BLACK);
-      display.drawLine(x + 13, y + 4, x + 22, y + 8, GxEPD_BLACK);
-      display.drawLine(x + 22, y + 8, x + 14, y + 12, GxEPD_BLACK);
-      display.drawLine(x + 14, y + 12, x + 5, y + 8, GxEPD_BLACK);
-      display.drawLine(x + 5, y + 8, x + 5, y + 17, GxEPD_BLACK);
-      display.drawLine(x + 5, y + 17, x + 14, y + 21, GxEPD_BLACK);
-      display.drawLine(x + 14, y + 21, x + 14, y + 12, GxEPD_BLACK);
-      display.drawLine(x + 22, y + 8, x + 22, y + 17, GxEPD_BLACK);
-      display.drawLine(x + 22, y + 17, x + 14, y + 21, GxEPD_BLACK);
-      display.fillCircle(x + 13, y + 8, 1, GxEPD_BLACK);
-      display.fillCircle(x + 9, y + 13, 1, GxEPD_BLACK);
-      display.fillCircle(x + 10, y + 17, 1, GxEPD_BLACK);
-      display.fillCircle(x + 18, y + 13, 1, GxEPD_BLACK);
-      display.fillCircle(x + 18, y + 17, 1, GxEPD_BLACK);
-      break;
-    case SLEEP:
-      display.fillCircle(x + 10, y + 12, 7, GxEPD_BLACK);
-      display.fillCircle(x + 14, y + 9, 7, GxEPD_WHITE);
-      display.setTextSize(1);
-      display.setCursor(x + 18, y + 3);
-      display.print(F("Z"));
-      display.setCursor(x + 21, y + 8);
-      display.print(F("Z"));
-      display.setCursor(x + 24, y + 13);
-      display.print(F("Z"));
-      break;
-    case OVERNIGHT:
-      display.drawCircle(x + 10, y + 12, 7, GxEPD_BLACK);
-      display.fillCircle(x + 10, y + 12, 1, GxEPD_BLACK);
-      display.drawLine(x + 10, y + 12, x + 10, y + 7, GxEPD_BLACK);
-      display.drawLine(x + 10, y + 12, x + 14, y + 14, GxEPD_BLACK);
-      display.setTextSize(1);
-      display.setCursor(x + 18, y + 4);
-      display.print(F("Z"));
-      display.setCursor(x + 21, y + 9);
-      display.print(F("Z"));
-      break;
-    case CLEAN:
-      display.drawLine(x + 6, y + 3, x + 18, y + 16, GxEPD_BLACK);
-      display.drawLine(x + 8, y + 2, x + 20, y + 15, GxEPD_BLACK);
-      display.drawLine(x + 6, y + 3, x + 8, y + 2, GxEPD_BLACK);
-      display.fillTriangle(x + 17, y + 14, x + 25, y + 19, x + 13, y + 22, GxEPD_BLACK);
-      display.drawLine(x + 16, y + 17, x + 21, y + 20, GxEPD_WHITE);
-      display.drawLine(x + 15, y + 19, x + 18, y + 21, GxEPD_WHITE);
-      break;
-    case MEDICINE:
-      display.drawCircle(x + 8, y + 17, 4, GxEPD_BLACK);
-      display.drawCircle(x + 19, y + 7, 4, GxEPD_BLACK);
-      display.drawLine(x + 5, y + 14, x + 16, y + 4, GxEPD_BLACK);
-      display.drawLine(x + 11, y + 20, x + 22, y + 10, GxEPD_BLACK);
-      display.drawLine(x + 10, y + 13, x + 15, y + 9, GxEPD_BLACK);
-      display.fillCircle(x + 8, y + 17, 3, GxEPD_BLACK);
-      break;
-    case LEARN:
-      display.drawLine(x + 3, y + 7, x + 13, y + 4, GxEPD_BLACK);
-      display.drawLine(x + 13, y + 4, x + 23, y + 7, GxEPD_BLACK);
-      display.drawLine(x + 3, y + 7, x + 3, y + 18, GxEPD_BLACK);
-      display.drawLine(x + 23, y + 7, x + 23, y + 18, GxEPD_BLACK);
-      display.drawLine(x + 3, y + 18, x + 13, y + 21, GxEPD_BLACK);
-      display.drawLine(x + 13, y + 21, x + 23, y + 18, GxEPD_BLACK);
-      display.drawLine(x + 13, y + 4, x + 13, y + 21, GxEPD_BLACK);
-      display.drawLine(x + 6, y + 10, x + 11, y + 9, GxEPD_BLACK);
-      display.drawLine(x + 15, y + 9, x + 20, y + 10, GxEPD_BLACK);
-      display.drawLine(x + 6, y + 14, x + 11, y + 14, GxEPD_BLACK);
-      display.drawLine(x + 15, y + 14, x + 20, y + 14, GxEPD_BLACK);
-      break;
-    case PET_ACTION:
-      display.drawCircle(x + 13, y + 15, 6, GxEPD_BLACK);
-      display.fillTriangle(x + 8, y + 11, x + 8, y + 5, x + 13, y + 10, GxEPD_BLACK);
-      display.fillTriangle(x + 18, y + 11, x + 18, y + 5, x + 13, y + 10, GxEPD_BLACK);
-      display.fillCircle(x + 11, y + 15, 1, GxEPD_BLACK);
-      display.fillCircle(x + 16, y + 15, 1, GxEPD_BLACK);
-      display.drawLine(x + 5, y + 5, x + 12, y + 2, GxEPD_BLACK);
-      display.drawLine(x + 12, y + 2, x + 22, y + 5, GxEPD_BLACK);
-      display.drawLine(x + 7, y + 7, x + 15, y + 4, GxEPD_BLACK);
-      display.drawLine(x + 15, y + 4, x + 22, y + 6, GxEPD_BLACK);
-      break;
-    case GROOM:
-      display.drawEllipse(x + 11, y + 8, 8, 4, GxEPD_BLACK);
-      display.drawLine(x + 18, y + 10, x + 24, y + 17, GxEPD_BLACK);
-      display.drawLine(x + 5, y + 11, x + 5, y + 18, GxEPD_BLACK);
-      display.drawLine(x + 8, y + 12, x + 8, y + 20, GxEPD_BLACK);
-      display.drawLine(x + 11, y + 12, x + 11, y + 20, GxEPD_BLACK);
-      display.drawLine(x + 14, y + 12, x + 14, y + 19, GxEPD_BLACK);
-      display.drawLine(x + 17, y + 11, x + 17, y + 17, GxEPD_BLACK);
-      break;
-    case WASH:
-      display.drawLine(x + 3, y + 4, x + 10, y + 4, GxEPD_BLACK);
-      display.drawLine(x + 3, y + 4, x + 2, y + 10, GxEPD_BLACK);
-      display.drawLine(x + 10, y + 4, x + 15, y + 9, GxEPD_BLACK);
-      display.drawEllipse(x + 15, y + 10, 5, 3, GxEPD_BLACK);
-      display.fillCircle(x + 14, y + 15, 1, GxEPD_BLACK);
-      display.fillCircle(x + 18, y + 17, 1, GxEPD_BLACK);
-      display.fillCircle(x + 22, y + 19, 1, GxEPD_BLACK);
-      break;
-    case SETTINGS:
-      display.drawCircle(x + 13, y + 11, 6, GxEPD_BLACK);
-      display.fillCircle(x + 13, y + 11, 2, GxEPD_BLACK);
-      break;
-    default: break;
+    case FEED: bitmap = FLASH_ADDRESS(ACTION_FOOD_ICON_BITMAP); break;
+    case WATER: bitmap = FLASH_ADDRESS(ACTION_WATER_ICON_BITMAP); break;
+    case PLAY: bitmap = FLASH_ADDRESS(ACTION_PLAY_ICON_BITMAP); break;
+    case SLEEP: bitmap = FLASH_ADDRESS(ACTION_MOON_ICON_BITMAP); break;
+    case OVERNIGHT: bitmap = FLASH_ADDRESS(ACTION_OVERNIGHT_ICON_BITMAP); break;
+    case CLEAN: bitmap = FLASH_ADDRESS(ACTION_CLEAN_ICON_BITMAP); break;
+    case MEDICINE: bitmap = FLASH_ADDRESS(ACTION_MEDICINE_ICON_BITMAP); break;
+    case LEARN: bitmap = FLASH_ADDRESS(ACTION_LEARN_ICON_BITMAP); break;
+    case PET_ACTION: bitmap = FLASH_ADDRESS(ACTION_PET_ICON_BITMAP); break;
+    case GROOM: bitmap = FLASH_ADDRESS(ACTION_GROOM_ICON_BITMAP); break;
+    case WASH: bitmap = FLASH_ADDRESS(ACTION_WASH_ICON_BITMAP); break;
+    case SETTINGS: bitmap = FLASH_ADDRESS(ACTION_BED_ICON_BITMAP); break;
+    default: return;
   }
+  drawScaledBitmap(x, y, bitmap, ACTION_ICON_WIDTH, ACTION_ICON_HEIGHT, 100);
 }
 
 void printActionName(Action action) {
@@ -813,37 +692,36 @@ void printActionName(Action action) {
     case OVERNIGHT: display.print(F("OVERNIGHT")); break;
     case CLEAN: display.print(F("CLEAN POOP")); break;
     case MEDICINE: display.print(F("MEDICINE")); break;
-    case LEARN: display.print(F("LEARN")); break;
+    case LEARN: display.print(F("READ")); break;
     case PET_ACTION: display.print(F("PET")); break;
     case GROOM: display.print(F("GROOM")); break;
-    case WASH: display.print(F("WASH")); break;
+    case WASH: display.print(F("BATH")); break;
     case SETTINGS: display.print(F("OPTIONS")); break;
     default: break;
   }
 }
 
 void drawHome() {
-  drawClock();
-  drawMeter(5, 28, 90, 0, pet.food);
-  drawMeter(5, 42, 90, 1, pet.water);
-  drawMeter(105, 28, 90, 2, pet.happy);
-  drawMeter(105, 42, 90, 3, pet.energy);
-  drawAnimal(100, 96, animal, gameClock.minute);
+  drawMeter(5, 8, 90, 0, pet.food);
+  drawMeter(5, 22, 90, 1, pet.water);
+  drawMeter(105, 8, 90, 2, pet.happy);
+  drawMeter(105, 22, 90, 3, pet.energy);
+  drawAnimal(100, 88, animal, gameClock.minute);
   if (pet.poop) {
-    display.fillCircle(164, 132, 7, GxEPD_BLACK);
-    display.fillTriangle(157, 132, 164, 120, 171, 132, GxEPD_BLACK);
+    display.fillCircle(164, 124, 7, GxEPD_BLACK);
+    display.fillTriangle(157, 124, 164, 112, 171, 124, GxEPD_BLACK);
   }
   if (pet.sick) {
-    drawVirus(28, 96);
+    drawVirus(28, 88);
   }
   if (pet.dirty) {
-    display.drawLine(151, 88, 160, 80, GxEPD_BLACK);
-    display.drawLine(161, 88, 170, 80, GxEPD_BLACK);
-    display.drawLine(171, 88, 180, 80, GxEPD_BLACK);
+    display.drawLine(151, 80, 160, 72, GxEPD_BLACK);
+    display.drawLine(161, 80, 170, 72, GxEPD_BLACK);
+    display.drawLine(171, 80, 180, 72, GxEPD_BLACK);
   }
   for (byte i = 0; i < SETTINGS; i++) {
-    int x = i < 6 ? 4 + i * 32 : 20 + (i - 6) * 36;
-    int y = i < 6 ? 146 : 172;
+    int x = i < 6 ? 3 + i * 32 : 18 + (i - 6) * 36;
+    int y = i < 6 ? 144 : 173;
     drawActionIcon((Action)i, x, y, selectedAction == i);
   }
 }
@@ -865,10 +743,6 @@ void drawSetupScreen() {
     drawSetupNumber(editField == 0 ? F("SET HOUR") : F("SET MINUTE"),
                     editField == 0 ? gameClock.hour : gameClock.minute,
                     F(""));
-  } else if (screen == SET_DATE) {
-    if (editField == 0) drawSetupNumber(F("SET DAY"), gameClock.day, F(""));
-    else if (editField == 1) drawSetupNumber(F("SET MONTH"), gameClock.month, F(""));
-    else drawSetupNumber(F("SET YEAR"), gameClock.year, F(""));
   } else {
     drawSetupFrame();
     drawAnimalScaled(100, 78, (Animal)animalChoice, 0, 130);
@@ -885,129 +759,14 @@ void drawEggScreen() {
   drawEggScaled(100, 103, eggFrame, 130);
 }
 
-void drawSceneSpark(int x, int y) {
-  display.drawLine(x - 5, y, x + 5, y, GxEPD_BLACK);
-  display.drawLine(x, y - 5, x, y + 5, GxEPD_BLACK);
-  display.drawLine(x - 3, y - 3, x + 3, y + 3, GxEPD_BLACK);
-  display.drawLine(x + 3, y - 3, x - 3, y + 3, GxEPD_BLACK);
-}
-
-void drawSpeciesSceneAccent(Animal kind, Action action, byte frame) {
-  int shift = frame % 2 ? 3 : 0;
-  switch (kind) {
-    case DOG:
-      display.drawCircle(171, 130 - shift, 3, GxEPD_BLACK);
-      display.drawCircle(163, 137 - shift, 3, GxEPD_BLACK);
-      display.fillCircle(167, 130 - shift, 1, GxEPD_BLACK);
-      break;
-    case BUNNY:
-      display.drawLine(158, 73 - shift, 174, 69 - shift, GxEPD_BLACK);
-      display.drawLine(160, 80 - shift, 178, 80 - shift, GxEPD_BLACK);
-      break;
-    case PANDA:
-      display.drawLine(165, 119, 178, 91 - shift, GxEPD_BLACK);
-      display.drawEllipse(176, 93 - shift, 6, 3, GxEPD_BLACK);
-      display.drawEllipse(168, 102 - shift, 6, 3, GxEPD_BLACK);
-      break;
-    case DRAGON:
-      if (action == WATER || action == WASH) {
-        display.drawCircle(170, 82 - shift, 3, GxEPD_BLACK);
-        display.drawCircle(179, 72 + shift, 5, GxEPD_BLACK);
-      } else {
-        display.fillTriangle(173, 91 - shift, 166, 104 - shift, 179, 104 - shift, GxEPD_BLACK);
-        display.fillTriangle(173, 96 - shift, 169, 104 - shift, 177, 104 - shift, GxEPD_WHITE);
-      }
-      break;
-    case FOX:
-      display.drawLine(159, 133 - shift, 177, 126 - shift, GxEPD_BLACK);
-      display.drawLine(161, 139 - shift, 181, 136 - shift, GxEPD_BLACK);
-      break;
-    case CHICKEN:
-      display.drawEllipse(169, 105 - shift, 7, 3, GxEPD_BLACK);
-      display.drawLine(166, 104 - shift, 172, 99 - shift, GxEPD_BLACK);
-      break;
-    case PIG:
-      display.drawCircle(172, 118 - shift, 7, GxEPD_BLACK);
-      display.drawCircle(174, 118 - shift, 3, GxEPD_WHITE);
-      break;
-    case HAMSTER:
-      display.drawEllipse(171, 126 - shift, 5, 3, GxEPD_BLACK);
-      display.drawLine(166, 126 - shift, 176, 126 - shift, GxEPD_BLACK);
-      break;
-    case PENGUIN:
-      display.drawLine(164, 91 - shift, 180, 91 - shift, GxEPD_BLACK);
-      display.drawLine(172, 83 - shift, 172, 99 - shift, GxEPD_BLACK);
-      display.drawLine(166, 85 - shift, 178, 97 - shift, GxEPD_BLACK);
-      display.drawLine(178, 85 - shift, 166, 97 - shift, GxEPD_BLACK);
-      break;
-    default: break;
-  }
-  if (frame == 3 && action != SLEEP && action != OVERNIGHT) drawSceneSpark(177, 58);
-}
-
 void drawScene() {
   drawClock();
   if (animal == CAT) {
     drawRleBitmapScaled(1, 42, catActionFrame(sceneAction, sceneFrame % 4),
                         CAT_ACTION_SCENE_WIDTH, CAT_ACTION_SCENE_HEIGHT, 108);
-  } else if (sceneAction == FEED || sceneAction == WATER || sceneAction == SLEEP || sceneAction == OVERNIGHT) {
+  } else {
     drawRleBitmap(8, 46, speciesActionFrame(animal, sceneAction, sceneFrame % 4),
                   SPECIES_ACTION_SCENE_WIDTH, SPECIES_ACTION_SCENE_HEIGHT);
-  } else {
-    int animalX = sceneAction == CLEAN || sceneAction == GROOM ? 83 :
-                  sceneAction == WATER || sceneAction == MEDICINE || sceneAction == LEARN ? 116 : 100;
-    drawAnimalPoseScaled(animalX, 116, animal, actionAnimalPose(sceneAction, sceneFrame), sceneFrame, 132);
-    switch (sceneAction) {
-      case CLEAN: {
-        int x = 173 - sceneFrame * 5;
-        display.drawLine(x, 73, x - 19, 137, GxEPD_BLACK);
-        display.drawLine(x + 2, 74, x - 17, 138, GxEPD_BLACK);
-        display.drawLine(x - 28, 136, x - 7, 141, GxEPD_BLACK);
-        display.drawLine(x - 25, 130, x - 4, 136, GxEPD_BLACK);
-        display.drawLine(x - 28, 136, x - 25, 130, GxEPD_BLACK);
-        break;
-      }
-      case MEDICINE: {
-        int x = 24 + sceneFrame * 3;
-        display.drawRoundRect(x, 83, 31, 14, 7, GxEPD_BLACK);
-        display.drawLine(x + 15, 84, x + 15, 96, GxEPD_BLACK);
-        display.fillRoundRect(x + 2, 85, 13, 10, 5, GxEPD_BLACK);
-        if (sceneFrame < 3) drawVirus(175, 77 + sceneFrame * 5);
-        break;
-      }
-      case LEARN:
-        display.drawLine(15, 92 - sceneFrame * 2, 38, 86 - sceneFrame * 2, GxEPD_BLACK);
-        display.drawLine(38, 86 - sceneFrame * 2, 61, 92 - sceneFrame * 2, GxEPD_BLACK);
-        display.drawLine(15, 92 - sceneFrame * 2, 15, 131 - sceneFrame * 2, GxEPD_BLACK);
-        display.drawLine(61, 92 - sceneFrame * 2, 61, 131 - sceneFrame * 2, GxEPD_BLACK);
-        display.drawLine(15, 131 - sceneFrame * 2, 38, 137 - sceneFrame * 2, GxEPD_BLACK);
-        display.drawLine(38, 86 - sceneFrame * 2, 38, 137 - sceneFrame * 2, GxEPD_BLACK);
-        display.drawLine(38, 137 - sceneFrame * 2, 61, 131 - sceneFrame * 2, GxEPD_BLACK);
-        break;
-      case PET_ACTION:
-        drawHeart(25, 98 - sceneFrame * 7);
-        drawHeart(165, 78 + sceneFrame * 3);
-        break;
-      case GROOM: {
-        int x = 161 - sceneFrame * 5;
-        display.drawEllipse(x, 91, 15, 7, GxEPD_BLACK);
-        display.drawLine(x + 11, 96, x + 25, 114, GxEPD_BLACK);
-        for (byte tooth = 0; tooth < 5; tooth++) {
-          display.drawLine(x - 9 + tooth * 5, 98, x - 9 + tooth * 5, 107, GxEPD_BLACK);
-        }
-        break;
-      }
-      case WASH:
-        for (byte i = 0; i < 5; i++) {
-          int x = 24 + i * 38;
-          int y = 72 + ((i + sceneFrame) % 2) * 16;
-          display.drawCircle(x, y, 5, GxEPD_BLACK);
-          display.fillCircle(x - 2, y - 2, 1, GxEPD_BLACK);
-        }
-        break;
-      default: break;
-    }
-    drawSpeciesSceneAccent(animal, sceneAction, sceneFrame);
   }
 }
 
@@ -1029,12 +788,10 @@ void drawGameMenu() {
 void drawOptions() {
   drawBookHeading(F("OPTIONS"), F("SELECT WHAT TO CHANGE"));
   display.setTextSize(2);
-  display.setCursor(34, 84);
+  display.setCursor(34, 96);
   display.print(editField == 0 ? F("> SET CLOCK") : F("  SET CLOCK"));
-  display.setCursor(34, 118);
-  display.print(editField == 1 ? F("> SET DATE") : F("  SET DATE"));
-  display.setCursor(34, 152);
-  display.print(editField == 2 ? F("> NEW EGG") : F("  NEW EGG"));
+  display.setCursor(34, 140);
+  display.print(editField == 1 ? F("> NEW EGG") : F("  NEW EGG"));
   display.setTextSize(1);
   display.setCursor(40, 181);
   display.print(F("< move   SELECT   move >"));
@@ -1047,7 +804,7 @@ void refreshDisplay() {
     display.fillScreen(GxEPD_WHITE);
     display.setTextColor(GxEPD_BLACK);
     if (screen == LANGUAGE) drawLanguageScreen();
-    else if (screen == SET_CLOCK || screen == SET_DATE || screen == SELECT_ANIMAL) drawSetupScreen();
+    else if (screen == SET_CLOCK || screen == SELECT_ANIMAL) drawSetupScreen();
     else if (screen == EGG) drawEggScreen();
     else if (screen == HOME) drawHome();
     else if (screen == ACTION_SCENE) drawScene();
@@ -1067,6 +824,10 @@ void animateAction(Action action) {
     delay(160);
   }
   sceneFrame = 3;
+  delay(1000);
+  screen = HOME;
+  displayDirty = true;
+  refreshDisplay();
 }
 
 void animateEggHatch() {
@@ -1225,7 +986,6 @@ void performAction(Action action) {
   saveGame(HOME);
   animateAction(action);
   happyTune();
-  displayDirty = true;
 }
 
 void changeSetupValue(int direction) {
@@ -1234,12 +994,6 @@ void changeSetupValue(int direction) {
   } else if (screen == SET_CLOCK) {
     if (editField == 0) gameClock.hour = (gameClock.hour + 24 + direction) % 24;
     else gameClock.minute = (gameClock.minute + 60 + direction) % 60;
-  } else if (screen == SET_DATE) {
-    if (editField == 0) gameClock.day = constrain(gameClock.day + direction, 1, daysInMonth(gameClock.month, gameClock.year));
-    else if (editField == 1) {
-      gameClock.month = constrain(gameClock.month + direction, 1, 12);
-      gameClock.day = min(gameClock.day, daysInMonth(gameClock.month, gameClock.year));
-    } else gameClock.year = constrain(gameClock.year + direction, 2024, 2099);
   } else if (screen == SELECT_ANIMAL) {
     animalChoice = (animalChoice + ANIMAL_COUNT + direction) % ANIMAL_COUNT;
   }
@@ -1258,17 +1012,12 @@ void handleButtons(bool left, bool select, bool right) {
     }
     return;
   }
-  if (screen == SET_CLOCK || screen == SET_DATE || screen == SELECT_ANIMAL) {
+  if (screen == SET_CLOCK || screen == SELECT_ANIMAL) {
     if (left) changeSetupValue(-1);
     if (right) changeSetupValue(1);
     if (select) {
       editField++;
       if (screen == SET_CLOCK && editField > 1) {
-        screen = setupCreatesEgg ? SET_DATE : HOME;
-        editField = 0;
-        if (!setupCreatesEgg) saveGame(HOME);
-      }
-      else if (screen == SET_DATE && editField > 2) {
         screen = setupCreatesEgg ? SELECT_ANIMAL : HOME;
         editField = 0;
         if (!setupCreatesEgg) saveGame(HOME);
@@ -1310,12 +1059,13 @@ void handleButtons(bool left, bool select, bool right) {
       displayDirty = true;
     }
   } else if (screen == OPTIONS) {
-    if (left) editField = (editField + 2) % 3;
-    if (right) editField = (editField + 1) % 3;
+    if (left || right) {
+      editField = !editField;
+      displayDirty = true;
+    }
     if (select) {
-      setupCreatesEgg = editField == 2;
+      setupCreatesEgg = editField == 1;
       if (editField == 0) { screen = SET_CLOCK; editField = 0; }
-      else if (editField == 1) { screen = SET_DATE; editField = 0; }
       else { screen = SELECT_ANIMAL; animalChoice = animal; }
       displayDirty = true;
     }
