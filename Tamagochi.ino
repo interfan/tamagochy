@@ -632,15 +632,32 @@ void animalPoseBitmapInfo(Animal kind, AnimalPose pose, FlashAddress &bitmap, by
 #undef SET_ANIMAL_POSE
 }
 
+int animalDisplayScale(Animal kind) {
+  switch (kind) {
+    case CAT: return 111;
+    case DOG: return 100;
+    case BUNNY: return 96;
+    case PANDA: return 145;
+    case DRAGON: return 131;
+    case FOX: return 131;
+    case CHICKEN: return 131;
+    case PIG: return 142;
+    case HAMSTER: return 106;
+    case PENGUIN: return 104;
+    default: return 100;
+  }
+}
+
 void drawAnimalScaled(int x, int y, Animal kind, byte pose, int scalePercent) {
   int bounce = pose % 2 ? -3 : 0;
   FlashAddress bitmap;
   byte width;
   byte height;
   animalBitmapInfo(kind, bitmap, width, height);
-  int scaledWidth = width * scalePercent / 100;
-  int scaledHeight = height * scalePercent / 100;
-  drawScaledBitmap(x - scaledWidth / 2, y + bounce - scaledHeight / 2, bitmap, width, height, scalePercent);
+  int effectiveScale = scalePercent * animalDisplayScale(kind) / 100;
+  int scaledWidth = width * effectiveScale / 100;
+  int scaledHeight = height * effectiveScale / 100;
+  drawScaledBitmap(x - scaledWidth / 2, y + bounce - scaledHeight / 2, bitmap, width, height, effectiveScale);
 }
 
 void drawAnimal(int x, int y, Animal kind, byte pose) {
@@ -650,7 +667,10 @@ void drawAnimal(int x, int y, Animal kind, byte pose) {
   byte width;
   byte height;
   animalPoseBitmapInfo(kind, pet.sleeping ? POSE_SLEEP : POSE_IDLE, bitmap, width, height);
-  drawScaledBitmap(x - width / 2, top - height / 2, bitmap, width, height, 100);
+  int scalePercent = animalDisplayScale(kind);
+  int scaledWidth = width * scalePercent / 100;
+  int scaledHeight = height * scalePercent / 100;
+  drawScaledBitmap(x - scaledWidth / 2, top - scaledHeight / 2, bitmap, width, height, scalePercent);
   if (pet.sleeping) {
     display.setTextSize(1);
     display.setCursor(x + 25, top - 34);
@@ -745,7 +765,7 @@ void drawSetupScreen() {
                     F(""));
   } else {
     drawSetupFrame();
-    drawAnimalScaled(100, 78, (Animal)animalChoice, 0, 130);
+    drawAnimalScaled(100, 78, (Animal)animalChoice, 0, 100);
     display.fillRoundRect(58, 164, 84, 24, 10, GxEPD_BLACK);
     display.setTextColor(GxEPD_WHITE);
     drawCenteredInBox(animalName((Animal)animalChoice), 58, 164, 84, 24, 1);
@@ -760,12 +780,15 @@ void drawEggScreen() {
 }
 
 void drawScene() {
-  drawClock();
   if (animal == CAT) {
-    drawRleBitmapScaled(1, 42, catActionFrame(sceneAction, sceneFrame % 4),
-                        CAT_ACTION_SCENE_WIDTH, CAT_ACTION_SCENE_HEIGHT, 108);
+    drawRleBitmap((200 - CAT_ACTION_SCENE_WIDTH) / 2,
+                  (200 - CAT_ACTION_SCENE_HEIGHT) / 2,
+                  catActionFrame(sceneAction, sceneFrame % 4),
+                  CAT_ACTION_SCENE_WIDTH, CAT_ACTION_SCENE_HEIGHT);
   } else {
-    drawRleBitmap(8, 46, speciesActionFrame(animal, sceneAction, sceneFrame % 4),
+    drawRleBitmap((200 - SPECIES_ACTION_SCENE_WIDTH) / 2,
+                  (200 - SPECIES_ACTION_SCENE_HEIGHT) / 2,
+                  speciesActionFrame(animal, sceneAction, sceneFrame % 4),
                   SPECIES_ACTION_SCENE_WIDTH, SPECIES_ACTION_SCENE_HEIGHT);
   }
 }
@@ -840,7 +863,7 @@ void animateEggHatch() {
       if (frame < 3) {
         drawEggScaled(100, 103, frame, 130);
       } else {
-        drawAnimalScaled(100, 96, animal, 1, 130);
+        drawAnimalScaled(100, 96, animal, 1, 100);
         drawHeart(24, 54);
         drawHeart(164, 62);
       }

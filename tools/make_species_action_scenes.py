@@ -19,6 +19,9 @@ OUTPUT = ROOT / "species_action_bitmaps.h"
 COMPANION_ANIMALS = ("dog", "bunny", "panda", "chicken", "pig", "hamster")
 SPECIAL_ANIMALS = ("dragon", "fox", "penguin")
 ACTIONS = ("medicine", "pet", "groom", "clean", "wash", "learn")
+ACTION_SCENE_WIDTH = 184
+ACTION_SCENE_HEIGHT = 184
+ACTION_SCENE_PADDING = 4
 
 
 def action_sources(action: str) -> tuple[tuple[Path, tuple[str, ...]], ...]:
@@ -83,16 +86,30 @@ def clean_final_frame(animal: str, action: str, frame_number: int, frame: Image.
         touches_outer_edge = min_y <= 1 or min_x <= 1 or max_x >= frame.width - 1
         if touches_outer_edge and count < 100:
             draw.rectangle((min_x, min_y, max_x - 1, max_y - 1), fill=255)
-    masks = {
-        ("dog", "pet", 2): ((0, 0, 14, 107),),
-        ("panda", "learn", 1): ((0, 0, 183, 12),),
-        ("panda", "learn", 2): ((0, 0, 183, 12),),
-        ("pig", "learn", 3): ((0, 0, 183, 15),),
-        ("penguin", "clean", 0): ((0, 0, 183, 10),),
-    }
-    for rectangle in masks.get((animal, action, frame_number), ()):
-        draw.rectangle(rectangle, fill=255)
     return cleaned
+
+
+def normalize_action_frame(frame: Image.Image) -> Image.Image:
+    binary = frame.point(lambda value: 0 if value < 180 else 255)
+    bbox = ImageOps.invert(binary).getbbox()
+    if not bbox:
+        return binary
+    cropped = binary.crop(bbox)
+    scale = min(
+        (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / cropped.width,
+        (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / cropped.height,
+    )
+    resized = cropped.resize(
+        (max(1, round(cropped.width * scale)), max(1, round(cropped.height * scale))),
+        Image.Resampling.LANCZOS,
+    )
+    resized = resized.point(lambda value: 0 if value < 180 else 255)
+    canvas = Image.new("L", (ACTION_SCENE_WIDTH, ACTION_SCENE_HEIGHT), 255)
+    canvas.paste(
+        resized,
+        ((ACTION_SCENE_WIDTH - resized.width) // 2, (ACTION_SCENE_HEIGHT - resized.height) // 2),
+    )
+    return canvas
 
 
 def prepare_action_row(
@@ -121,19 +138,23 @@ def prepare_action_row(
         bbox = ImageOps.invert(ink).getbbox()
         cropped.append(part.crop(bbox) if bbox else part)
 
-    max_width = max(frame.width for frame in cropped)
-    max_height = max(frame.height for frame in cropped)
-    scale = min(178 / max_width, 102 / max_height)
     prepared = []
     for frame in cropped:
+        scale = min(
+            (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / frame.width,
+            (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / frame.height,
+        )
         resized = frame.resize(
             (max(1, round(frame.width * scale)), max(1, round(frame.height * scale))),
             Image.Resampling.LANCZOS,
         )
         resized = ImageOps.autocontrast(resized)
         resized = ImageEnhance.Contrast(resized).enhance(1.8)
-        canvas = Image.new("L", (184, 108), 255)
-        canvas.paste(resized, ((184 - resized.width) // 2, 108 - resized.height - 2))
+        canvas = Image.new("L", (ACTION_SCENE_WIDTH, ACTION_SCENE_HEIGHT), 255)
+        canvas.paste(
+            resized,
+            ((ACTION_SCENE_WIDTH - resized.width) // 2, (ACTION_SCENE_HEIGHT - resized.height) // 2),
+        )
         prepared.append(canvas.point(lambda value: 0 if value < 180 else 255))
     return prepared
 
@@ -157,12 +178,13 @@ def main() -> None:
             with Image.open(source) as source_sheet:
                 for row, animal in enumerate(animals):
                     frames = prepare_action_row(source_sheet, row, len(animals), action)
-                    preview_sheet = Image.new("L", (184 * 4, 108), 255)
+                    preview_sheet = Image.new("L", (ACTION_SCENE_WIDTH * 4, ACTION_SCENE_HEIGHT), 255)
                     for frame_number, frame in enumerate(frames):
                         frame = clean_species_scene_frame(animal, action, frame_number, frame)
                         frame = clean_final_frame(animal, action, frame_number, frame)
+                        frame = normalize_action_frame(frame)
                         frame.save(PREVIEW_DIR / f"{animal}-{action}-scene-{frame_number}.png")
-                        preview_sheet.paste(frame, (184 * frame_number, 0))
+                        preview_sheet.paste(frame, (ACTION_SCENE_WIDTH * frame_number, 0))
 
                         runs = encode_rle(frame)
                         validate_rle(frame, runs)

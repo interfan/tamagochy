@@ -21,6 +21,9 @@ ACTION_SCENES = (
     "feed", "water", "sleep", "overnight", "clean",
     "medicine", "learn", "pet", "groom", "wash",
 )
+ACTION_SCENE_WIDTH = 184
+ACTION_SCENE_HEIGHT = 184
+ACTION_SCENE_PADDING = 4
 SPECS = {
     "cat": {
         "crop": (0, 100, 570, 770), "width": 88, "height": 96, "threshold": 170,
@@ -214,20 +217,21 @@ def prepare_action_frames(
             bbox = ImageOps.invert(ink).getbbox()
             cropped.append(part.crop(bbox) if bbox else part)
 
-    max_width = max(frame.width for frame in cropped)
-    max_height = max(frame.height for frame in cropped)
-    scale = min(178 / max_width, 102 / max_height)
     prepared = []
     for frame in cropped:
+        scale = min(
+            (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / frame.width,
+            (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / frame.height,
+        )
         resized = frame.resize(
             (max(1, round(frame.width * scale)), max(1, round(frame.height * scale))),
             Image.Resampling.LANCZOS,
         )
         resized = ImageOps.autocontrast(resized)
         resized = ImageEnhance.Contrast(resized).enhance(2.0)
-        canvas = Image.new("L", (184, 108), 255)
-        x = (184 - resized.width) // 2
-        y = 108 - resized.height - 2
+        canvas = Image.new("L", (ACTION_SCENE_WIDTH, ACTION_SCENE_HEIGHT), 255)
+        x = (ACTION_SCENE_WIDTH - resized.width) // 2
+        y = (ACTION_SCENE_HEIGHT - resized.height) // 2
         canvas.paste(resized, (x, y))
         prepared.append(canvas.point(lambda value: 0 if value < 180 else 255))
     return prepared
@@ -249,19 +253,43 @@ def prepare_grid_action_frames(image: Image.Image, row: int, row_count: int) -> 
         ink = part.point(lambda value: 0 if value < 225 else 255)
         bbox = ImageOps.invert(ink).getbbox()
         part = part.crop(bbox) if bbox else part
-        scale = min(178 / part.width, 102 / part.height)
+        scale = min(
+            (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / part.width,
+            (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / part.height,
+        )
         resized = part.resize(
             (max(1, round(part.width * scale)), max(1, round(part.height * scale))),
             Image.Resampling.LANCZOS,
         )
         resized = ImageOps.autocontrast(resized)
         resized = ImageEnhance.Contrast(resized).enhance(1.8)
-        frame = Image.new("L", (184, 108), 255)
-        x = (184 - resized.width) // 2
-        y = 108 - resized.height - 2
+        frame = Image.new("L", (ACTION_SCENE_WIDTH, ACTION_SCENE_HEIGHT), 255)
+        x = (ACTION_SCENE_WIDTH - resized.width) // 2
+        y = (ACTION_SCENE_HEIGHT - resized.height) // 2
         frame.paste(resized, (x, y))
         prepared.append(frame.point(lambda value: 0 if value < 180 else 255))
     return prepared
+
+
+def normalize_action_frame(frame: Image.Image) -> Image.Image:
+    binary = frame.point(lambda value: 0 if value < 180 else 255)
+    bbox = ImageOps.invert(binary).getbbox()
+    if not bbox:
+        return binary
+    cropped = binary.crop(bbox)
+    scale = min(
+        (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / cropped.width,
+        (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / cropped.height,
+    )
+    resized = cropped.resize(
+        (max(1, round(cropped.width * scale)), max(1, round(cropped.height * scale))),
+        Image.Resampling.LANCZOS,
+    )
+    resized = resized.point(lambda value: 0 if value < 180 else 255)
+    canvas = Image.new("L", (ACTION_SCENE_WIDTH, ACTION_SCENE_HEIGHT), 255)
+    canvas.paste(resized, ((ACTION_SCENE_WIDTH - resized.width) // 2,
+                           (ACTION_SCENE_HEIGHT - resized.height) // 2))
+    return canvas
 
 
 def clean_action_frame(action: str, frame_number: int, frame: Image.Image) -> Image.Image:
@@ -519,10 +547,10 @@ def main() -> None:
     for name, spec in FINAL_COMPANION_SPECS.items():
         append_companion(output, final_companions, name, spec)
 
-    output.append("const uint8_t CAT_ACTION_SCENE_WIDTH = 184;")
-    output.append("const uint8_t CAT_ACTION_SCENE_HEIGHT = 108;")
-    output.append("const uint8_t SPECIES_ACTION_SCENE_WIDTH = 184;")
-    output.append("const uint8_t SPECIES_ACTION_SCENE_HEIGHT = 108;")
+    output.append(f"const uint8_t CAT_ACTION_SCENE_WIDTH = {ACTION_SCENE_WIDTH};")
+    output.append(f"const uint8_t CAT_ACTION_SCENE_HEIGHT = {ACTION_SCENE_HEIGHT};")
+    output.append(f"const uint8_t SPECIES_ACTION_SCENE_WIDTH = {ACTION_SCENE_WIDTH};")
+    output.append(f"const uint8_t SPECIES_ACTION_SCENE_HEIGHT = {ACTION_SCENE_HEIGHT};")
     for action, scene_sheets in (
         ("feed", SPECIES_FEED_SHEETS),
         ("water", SPECIES_WATER_SHEETS),
@@ -531,11 +559,12 @@ def main() -> None:
         for source_path, animals in scene_sheets:
             sheet = Image.open(source_path)
             for row, animal in enumerate(animals):
-                contact_sheet = Image.new("L", (184 * 4, 108), 255)
+                contact_sheet = Image.new("L", (ACTION_SCENE_WIDTH * 4, ACTION_SCENE_HEIGHT), 255)
                 for frame_number, frame in enumerate(prepare_grid_action_frames(sheet, row, len(animals))):
                     frame = clean_species_scene_frame(animal, action, frame_number, frame)
+                    frame = normalize_action_frame(frame)
                     frame.save(PREVIEW_DIR / f"{animal}-{action}-scene-{frame_number}.png")
-                    contact_sheet.paste(frame, (184 * frame_number, 0))
+                    contact_sheet.paste(frame, (ACTION_SCENE_WIDTH * frame_number, 0))
                     runs = encode_rle(frame)
                     validate_rle(frame, runs)
                     output.append(format_array(
@@ -556,11 +585,12 @@ def main() -> None:
             Image.open(ACTION_SCENE_DIR / f"{action}.png"),
             source_frames=source_frames,
         )
-        contact_sheet = Image.new("L", (184 * 4, 108), 255)
+        contact_sheet = Image.new("L", (ACTION_SCENE_WIDTH * 4, ACTION_SCENE_HEIGHT), 255)
         for frame_number, frame in enumerate(frames):
             frame = clean_action_frame(action, frame_number, frame)
+            frame = normalize_action_frame(frame)
             frame.save(PREVIEW_DIR / f"cat-{action}-{frame_number}.png")
-            contact_sheet.paste(frame, (184 * frame_number, 0))
+            contact_sheet.paste(frame, (ACTION_SCENE_WIDTH * frame_number, 0))
             if action != "overnight":
                 runs = encode_rle(frame)
                 validate_rle(frame, runs)
