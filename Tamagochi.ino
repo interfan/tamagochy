@@ -12,6 +12,7 @@
 
 #include <Adafruit_GFX.h>
 #include <EEPROM.h>
+#include <U8g2_for_Adafruit_GFX.h>
 #include "companion_bitmaps.h"
 #include "action_icons.h"
 #include "species_action_bitmaps.h"
@@ -57,6 +58,8 @@ const unsigned long CLOCK_TICK_MS = 60000UL;
 const unsigned long NEEDS_TICK_MS = 20UL * 60000UL;
 const unsigned long EGG_FRAME_MS = 15UL * 60000UL;
 const uint32_t SAVE_MAGIC = 0x54414D41UL;
+const unsigned int PET_ADULT_DAYS = 30;
+const byte WORK_SHORTCUT_PRESSES = 5;
 
 #ifdef WOKWI_SIM
 #define GxEPD_BLACK ILI9341_BLACK
@@ -78,10 +81,12 @@ WokwiDisplay display(EPD_CS_PIN, EPD_DC_PIN, EPD_RST_PIN);
 GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(
     GxEPD2_154_D67(EPD_CS_PIN, EPD_DC_PIN, EPD_RST_PIN, EPD_BUSY_PIN));
 #endif
+U8G2_FOR_ADAFRUIT_GFX u8g2Text;
 
 enum Screen : byte {
   LANGUAGE = 0, SET_CLOCK = 1, SELECT_ANIMAL = 3, EGG = 4, HATCHING = 5,
-  HOME = 6, ACTION_SCENE = 7, GAME_MENU = 8, OPTIONS = 9, GAME_PLAY = 10
+  HOME = 6, ACTION_SCENE = 7, GAME_MENU = 8, OPTIONS = 9, GAME_PLAY = 10,
+  GROWN_UP = 11
 };
 enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, CHICKEN, PIG, HAMSTER, PENGUIN, ANIMAL_COUNT };
 enum AnimalPose : byte { POSE_IDLE, POSE_HAPPY, POSE_SLEEP };
@@ -91,6 +96,17 @@ enum Action : byte {
 };
 enum MiniGame : byte { GAME_HIGH_LOW, GAME_COIN_TOSS, GAME_SHELL, MINI_GAME_COUNT };
 enum MiniGamePhase : byte { MINI_GAME_PICK, MINI_GAME_RESULT };
+enum UiText : byte {
+  TXT_SET_HOUR, TXT_SET_MINUTE, TXT_OPTIONS, TXT_CHANGE, TXT_SET_CLOCK, TXT_NEW_EGG,
+  TXT_OPTIONS_HINT, TXT_FOOD, TXT_WATER, TXT_PLAY, TXT_NAP, TXT_OVERNIGHT,
+  TXT_CLEAN, TXT_MEDICINE, TXT_READ, TXT_PET, TXT_GROOM, TXT_BATH,
+  TXT_GAME_HIGH_LOW_MENU, TXT_GAME_HIGH_LOW_TITLE, TXT_GAME_COIN, TXT_GAME_SHELL,
+  TXT_HIGHER, TXT_LOWER, TXT_NEXT, TXT_CORRECT_20, TXT_WRONG_5,
+  TXT_HEADS, TXT_TAILS, TXT_COIN_HEAD_MARK, TXT_COIN_TAIL_MARK,
+  TXT_YOU_GOT_IT, TXT_MISSED, TXT_PLUS_20_HAPPY, TXT_PLUS_5_HAPPY,
+  TXT_FIND_BALL, TXT_MOVE, TXT_FOUND_20, TXT_EMPTY_5,
+  TXT_GROWN_TITLE, TXT_GROWN_DAY, TXT_GROWN_WORK
+};
 
 struct Button {
   byte pin;
@@ -128,6 +144,7 @@ struct SaveData {
   byte animal;
   byte stage;
   unsigned int hatchMinutesLeft;
+  byte language;
 };
 
 Button leftButton = {LEFT_PIN, HIGH, HIGH, 0};
@@ -164,6 +181,8 @@ bool startupShortcutArmed = true;
 unsigned long startupSelectHeldSince = 0;
 byte eggSelectCount = 0;
 unsigned long lastEggSelect = 0;
+byte workShortcutRightCount = 0;
+byte workShortcutLeftCount = 0;
 
 byte clampStat(int value) {
   return constrain(value, 0, 100);
@@ -179,27 +198,20 @@ byte daysInMonth(byte month, unsigned int year) {
 }
 
 void chirp(unsigned int frequency, unsigned int duration) {
-  tone(BUZZER_PIN, frequency, duration);
+  (void)frequency;
+  (void)duration;
 }
 
 void playTune(const int *notes, const uint16_t *lengths, byte count) {
-  for (byte i = 0; i < count; i++) {
-    tone(BUZZER_PIN, notes[i], lengths[i]);
-    delay(lengths[i] + 35);
-  }
-  noTone(BUZZER_PIN);
+  (void)notes;
+  (void)lengths;
+  (void)count;
 }
 
 void happyTune() {
-  const int notes[] = {523, 659, 784};
-  const uint16_t lengths[] = {90, 90, 150};
-  playTune(notes, lengths, 3);
 }
 
 void hatchTune() {
-  const int notes[] = {523, 659, 784, 1047, 784, 1047};
-  const uint16_t lengths[] = {100, 100, 100, 220, 100, 300};
-  playTune(notes, lengths, 6);
 }
 
 bool pressed(Button &button) {
@@ -215,8 +227,18 @@ bool pressed(Button &button) {
   return false;
 }
 
+bool savedStageValid(byte stage) {
+  return stage == EGG || stage == HOME || stage == GROWN_UP;
+}
+
+byte currentSaveStage() {
+  if (screen == EGG) return EGG;
+  if (screen == GROWN_UP) return GROWN_UP;
+  return HOME;
+}
+
 void saveGame(byte stage) {
-  SaveData data = {SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft};
+  SaveData data = {SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft, languageChoice};
   EEPROM.put(0, data);
 #if defined(ESP32)
   EEPROM.commit();
@@ -226,14 +248,17 @@ void saveGame(byte stage) {
 bool loadGame() {
   SaveData data;
   EEPROM.get(0, data);
-  if (data.magic != SAVE_MAGIC || data.animal >= ANIMAL_COUNT || data.stage > HOME) {
+  if (data.magic != SAVE_MAGIC || data.animal >= ANIMAL_COUNT || !savedStageValid(data.stage)) {
     return false;
   }
   gameClock = data.clock;
   pet = data.pet;
   animal = (Animal)data.animal;
+  languageChoice = data.language < 3 ? data.language : 0;
   hatchMinutesLeft = data.hatchMinutesLeft;
-  screen = data.stage == EGG ? EGG : HOME;
+  if (data.stage == EGG) screen = EGG;
+  else if (data.stage == GROWN_UP || pet.ageDays >= PET_ADULT_DAYS) screen = GROWN_UP;
+  else screen = HOME;
   return true;
 }
 
@@ -253,6 +278,169 @@ const __FlashStringHelper *animalName(Animal kind) {
   }
 }
 
+const __FlashStringHelper *uiText(UiText text) {
+  if (languageChoice == 1) {
+    return F("");
+  } else if (languageChoice == 2) {
+    switch (text) {
+      case TXT_SET_HOUR: return F("STUNDE");
+      case TXT_SET_MINUTE: return F("MINUTE");
+      case TXT_OPTIONS: return F("OPTION");
+      case TXT_CHANGE: return F("AENDERN");
+      case TXT_SET_CLOCK: return F("UHR STELLEN");
+      case TXT_NEW_EGG: return F("NEUES EI");
+      case TXT_OPTIONS_HINT: return F("< > WAHL   OK");
+      case TXT_FOOD: return F("FUTTER");
+      case TXT_WATER: return F("WASSER");
+      case TXT_PLAY: return F("SPIEL");
+      case TXT_NAP: return F("SCHLAF");
+      case TXT_OVERNIGHT: return F("NACHT");
+      case TXT_CLEAN: return F("SAUBER");
+      case TXT_MEDICINE: return F("MEDIZIN");
+      case TXT_READ: return F("LESEN");
+      case TXT_PET: return F("STREICH");
+      case TXT_GROOM: return F("KAMM");
+      case TXT_BATH: return F("BAD");
+      case TXT_GAME_HIGH_LOW_MENU: return F("HOCH / TIEF");
+      case TXT_GAME_HIGH_LOW_TITLE: return F("HOCH TIEF");
+      case TXT_GAME_COIN: return F("MUENZWURF");
+      case TXT_GAME_SHELL: return F("BECHER");
+      case TXT_HIGHER: return F("HOCH");
+      case TXT_LOWER: return F("TIEF");
+      case TXT_NEXT: return F("NAECH");
+      case TXT_CORRECT_20: return F("RICHTIG +20");
+      case TXT_WRONG_5: return F("FALSCH +5");
+      case TXT_HEADS: return F("KOPF");
+      case TXT_TAILS: return F("ZAHL");
+      case TXT_COIN_HEAD_MARK: return F("K");
+      case TXT_COIN_TAIL_MARK: return F("Z");
+      case TXT_YOU_GOT_IT: return F("RICHTIG");
+      case TXT_MISSED: return F("DANEBEN");
+      case TXT_PLUS_20_HAPPY: return F("+20 GLUECK");
+      case TXT_PLUS_5_HAPPY: return F("+5 GLUECK");
+      case TXT_FIND_BALL: return F("FINDE BALL");
+      case TXT_MOVE: return F("WECHSEL");
+      case TXT_FOUND_20: return F("GEFUNDEN +20");
+      case TXT_EMPTY_5: return F("LEER +5");
+      case TXT_GROWN_TITLE: return F("GROSS!");
+      case TXT_GROWN_DAY: return F("TAG 30");
+      case TXT_GROWN_WORK: return F("ZUR ARBEIT");
+    }
+  }
+
+  switch (text) {
+    case TXT_SET_HOUR: return F("SET HOUR");
+    case TXT_SET_MINUTE: return F("SET MINUTE");
+    case TXT_OPTIONS: return F("OPTIONS");
+    case TXT_CHANGE: return F("CHANGE");
+    case TXT_SET_CLOCK: return F("SET CLOCK");
+    case TXT_NEW_EGG: return F("NEW EGG");
+    case TXT_OPTIONS_HINT: return F("< > MOVE   OK");
+    case TXT_FOOD: return F("FOOD");
+    case TXT_WATER: return F("WATER");
+    case TXT_PLAY: return F("PLAY");
+    case TXT_NAP: return F("NAP");
+    case TXT_OVERNIGHT: return F("NIGHT");
+    case TXT_CLEAN: return F("CLEAN");
+    case TXT_MEDICINE: return F("MEDS");
+    case TXT_READ: return F("READ");
+    case TXT_PET: return F("PET");
+    case TXT_GROOM: return F("GROOM");
+    case TXT_BATH: return F("BATH");
+    case TXT_GAME_HIGH_LOW_MENU: return F("HIGHER / LOWER");
+    case TXT_GAME_HIGH_LOW_TITLE: return F("HIGH LOW");
+    case TXT_GAME_COIN: return F("COIN TOSS");
+    case TXT_GAME_SHELL: return F("SHELL GAME");
+    case TXT_HIGHER: return F("HIGHER");
+    case TXT_LOWER: return F("LOWER");
+    case TXT_NEXT: return F("NEXT");
+    case TXT_CORRECT_20: return F("CORRECT +20");
+    case TXT_WRONG_5: return F("WRONG +5");
+    case TXT_HEADS: return F("HEADS");
+    case TXT_TAILS: return F("TAILS");
+    case TXT_COIN_HEAD_MARK: return F("H");
+    case TXT_COIN_TAIL_MARK: return F("T");
+    case TXT_YOU_GOT_IT: return F("YOU GOT IT");
+    case TXT_MISSED: return F("MISSED");
+    case TXT_PLUS_20_HAPPY: return F("+20 HAPPY");
+    case TXT_PLUS_5_HAPPY: return F("+5 HAPPY");
+    case TXT_FIND_BALL: return F("FIND THE BALL");
+    case TXT_MOVE: return F("MOVE");
+    case TXT_FOUND_20: return F("FOUND +20");
+    case TXT_EMPTY_5: return F("EMPTY +5");
+    case TXT_GROWN_TITLE: return F("GROWN UP!");
+    case TXT_GROWN_DAY: return F("DAY 30");
+    case TXT_GROWN_WORK: return F("OFF TO WORK");
+  }
+  return F("");
+}
+
+const char *bgText(UiText text) {
+  switch (text) {
+    case TXT_SET_HOUR: return "ЧАС";
+    case TXT_SET_MINUTE: return "МИНУТА";
+    case TXT_OPTIONS: return "ОПЦИИ";
+    case TXT_CHANGE: return "ПРОМЕНИ";
+    case TXT_SET_CLOCK: return "ЧАСОВНИК";
+    case TXT_NEW_EGG: return "НОВО ЯЙЦЕ";
+    case TXT_OPTIONS_HINT: return "< > МЕСТИ   OK";
+    case TXT_FOOD: return "ХРАНА";
+    case TXT_WATER: return "ВОДА";
+    case TXT_PLAY: return "ИГРА";
+    case TXT_NAP: return "СЪН";
+    case TXT_OVERNIGHT: return "НОЩ";
+    case TXT_CLEAN: return "ЧИСТИ";
+    case TXT_MEDICINE: return "ЛЕК";
+    case TXT_READ: return "ЧЕТИ";
+    case TXT_PET: return "ГАЛИ";
+    case TXT_GROOM: return "РЕШИ";
+    case TXT_BATH: return "БАНЯ";
+    case TXT_GAME_HIGH_LOW_MENU: return "ГОЛЯМО / МАЛКО";
+    case TXT_GAME_HIGH_LOW_TITLE: return "ГОЛЯМО МАЛКО";
+    case TXT_GAME_COIN: return "МОНЕТА";
+    case TXT_GAME_SHELL: return "ЧАШКИ";
+    case TXT_HIGHER: return "ГОЛЯМО";
+    case TXT_LOWER: return "МАЛКО";
+    case TXT_NEXT: return "СЛЕД";
+    case TXT_CORRECT_20: return "ВЯРНО +20";
+    case TXT_WRONG_5: return "ГРЕШНО +5";
+    case TXT_HEADS: return "ЕЗИ";
+    case TXT_TAILS: return "ТУРА";
+    case TXT_COIN_HEAD_MARK: return "Е";
+    case TXT_COIN_TAIL_MARK: return "Т";
+    case TXT_YOU_GOT_IT: return "ПОЗНА";
+    case TXT_MISSED: return "НЕ";
+    case TXT_PLUS_20_HAPPY: return "+20 РАДОСТ";
+    case TXT_PLUS_5_HAPPY: return "+5 РАДОСТ";
+    case TXT_FIND_BALL: return "НАМЕРИ ТОПКА";
+    case TXT_MOVE: return "МЕСТИ";
+    case TXT_FOUND_20: return "НАМЕРИ +20";
+    case TXT_EMPTY_5: return "ПРАЗНО +5";
+    case TXT_GROWN_TITLE: return "ПОРАСНА!";
+    case TXT_GROWN_DAY: return "ДЕН 30";
+    case TXT_GROWN_WORK: return "НА РАБОТА";
+  }
+  return "";
+}
+
+UiText actionLabel(Action action) {
+  switch (action) {
+    case FEED: return TXT_FOOD;
+    case WATER: return TXT_WATER;
+    case PLAY: return TXT_PLAY;
+    case SLEEP: return TXT_NAP;
+    case OVERNIGHT: return TXT_OVERNIGHT;
+    case CLEAN: return TXT_CLEAN;
+    case MEDICINE: return TXT_MEDICINE;
+    case LEARN: return TXT_READ;
+    case PET_ACTION: return TXT_PET;
+    case GROOM: return TXT_GROOM;
+    case WASH: return TXT_BATH;
+    case SETTINGS: return TXT_OPTIONS;
+    default: return TXT_OPTIONS;
+  }
+}
+
 void drawCentered(const __FlashStringHelper *text, int y, byte size = 1) {
   int16_t x1, y1;
   uint16_t w, h;
@@ -269,6 +457,60 @@ void drawCenteredInBox(const __FlashStringHelper *text, int x, int y, int w, int
   display.getTextBounds(text, 0, 0, &x1, &y1, &tw, &th);
   display.setCursor(x + (w - tw) / 2 - x1, y + (h - th) / 2 - y1);
   display.print(text);
+}
+
+bool useCyrillicText() {
+  return languageChoice == 1;
+}
+
+void setCyrillicFont(byte size, uint16_t color) {
+  u8g2Text.setFont(size >= 2 ? u8g2_font_9x15_t_cyrillic : u8g2_font_6x12_t_cyrillic);
+  u8g2Text.setFontMode(1);
+  u8g2Text.setFontDirection(0);
+  u8g2Text.setForegroundColor(color);
+}
+
+int uiTextWidth(UiText text, byte size = 1) {
+  if (useCyrillicText()) {
+    setCyrillicFont(size, GxEPD_BLACK);
+    return u8g2Text.getUTF8Width(bgText(text));
+  }
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.setTextSize(size);
+  display.getTextBounds(uiText(text), 0, 0, &x1, &y1, &w, &h);
+  return w;
+}
+
+int uiTextHeight(byte size = 1) {
+  if (useCyrillicText()) {
+    setCyrillicFont(size, GxEPD_BLACK);
+    return u8g2Text.getFontAscent() - u8g2Text.getFontDescent();
+  }
+  return 8 * size;
+}
+
+void drawUiText(UiText text, int x, int y, byte size = 1, uint16_t color = GxEPD_BLACK) {
+  if (useCyrillicText()) {
+    setCyrillicFont(size, color);
+    u8g2Text.drawUTF8(x, y + u8g2Text.getFontAscent(), bgText(text));
+  } else {
+    display.setTextColor(color);
+    display.setTextSize(size);
+    display.setCursor(x, y);
+    display.print(uiText(text));
+  }
+}
+
+void drawUiCentered(UiText text, int y, byte size = 1, uint16_t color = GxEPD_BLACK) {
+  drawUiText(text, (200 - uiTextWidth(text, size)) / 2, y, size, color);
+}
+
+void drawUiCenteredInBox(UiText text, int x, int y, int w, int h, byte size = 1,
+                         uint16_t color = GxEPD_BLACK) {
+  int tw = uiTextWidth(text, size);
+  int th = uiTextHeight(size);
+  drawUiText(text, x + (w - tw) / 2, y + (h - th) / 2, size, color);
 }
 
 void drawScaledBitmap(int x, int y, FlashAddress bitmap, int width, int height, int scalePercent) {
@@ -400,11 +642,11 @@ void drawBookDivider(int y) {
   display.fillCircle(100, y, 2, GxEPD_WHITE);
 }
 
-void drawBookHeading(const __FlashStringHelper *title, const __FlashStringHelper *subtitle) {
+void drawBookHeading(UiText title, UiText subtitle) {
   drawBookFrame();
-  drawCentered(title, 58, 2);
+  drawUiCentered(title, 58, 2);
   drawBookDivider(68);
-  drawCentered(subtitle, 90);
+  drawUiCentered(subtitle, 90, 1);
 }
 
 void drawBookChoice(int x, int y, int w, int h, const __FlashStringHelper *label, bool selected) {
@@ -444,7 +686,7 @@ void drawVirus(int x, int y) {
 }
 
 void drawEgg(int x, int y, byte frame) {
-  int lean = frame == 1 ? -4 : frame == 2 ? 4 : 0;
+  int lean = 0;
   drawScaledBitmap(x - EGG_WIDTH / 2 + lean, y - EGG_HEIGHT / 2,
                    FLASH_ADDRESS(EGG_BITMAP), EGG_WIDTH, EGG_HEIGHT, 100);
   display.drawLine(x - 16 + lean, y - 29, x - 9 + lean, y - 23, GxEPD_BLACK);
@@ -467,7 +709,7 @@ void drawEgg(int x, int y, byte frame) {
 }
 
 void drawEggScaled(int x, int y, byte frame, int scalePercent) {
-  int lean = frame == 1 ? -5 : frame == 2 ? 5 : 0;
+  int lean = 0;
   int scaledWidth = EGG_WIDTH * scalePercent / 100;
   int scaledHeight = EGG_HEIGHT * scalePercent / 100;
   drawScaledBitmap(x - scaledWidth / 2 + lean, y - scaledHeight / 2,
@@ -702,20 +944,11 @@ void drawActionIcon(Action action, int x, int y, bool selected) {
 }
 
 void printActionName(Action action) {
-  switch (action) {
-    case FEED: display.print(F("FOOD")); break;
-    case WATER: display.print(F("WATER")); break;
-    case PLAY: display.print(F("PLAY")); break;
-    case SLEEP: display.print(F("NAP")); break;
-    case OVERNIGHT: display.print(F("OVERNIGHT")); break;
-    case CLEAN: display.print(F("CLEAN POOP")); break;
-    case MEDICINE: display.print(F("MEDICINE")); break;
-    case LEARN: display.print(F("READ")); break;
-    case PET_ACTION: display.print(F("PET")); break;
-    case GROOM: display.print(F("GROOM")); break;
-    case WASH: display.print(F("BATH")); break;
-    case SETTINGS: display.print(F("OPTIONS")); break;
-    default: break;
+  if (useCyrillicText()) {
+    setCyrillicFont(1, GxEPD_BLACK);
+    u8g2Text.print(bgText(actionLabel(action)));
+  } else {
+    display.print(uiText(actionLabel(action)));
   }
 }
 
@@ -744,9 +977,30 @@ void drawHome() {
   }
 }
 
-void drawSetupNumber(const __FlashStringHelper *title, int value, const __FlashStringHelper *hint) {
+void drawBriefcase(int x, int y) {
+  display.drawRoundRect(x, y, 38, 27, 4, GxEPD_BLACK);
+  display.drawRoundRect(x + 12, y - 6, 14, 8, 3, GxEPD_BLACK);
+  display.drawLine(x, y + 11, x + 38, y + 11, GxEPD_BLACK);
+  display.fillCircle(x + 19, y + 11, 2, GxEPD_BLACK);
+}
+
+void drawGrownUpScreen() {
+  display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
+  display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
+  drawUiCentered(TXT_GROWN_TITLE, 18, 2);
+  drawUiCentered(TXT_GROWN_DAY, 43, 1);
+  display.drawLine(38, 58, 162, 58, GxEPD_BLACK);
+  drawAnimalScaled(82, 112, animal, 1, 78);
+  drawBriefcase(126, 123);
+  display.drawLine(36, 158, 164, 158, GxEPD_BLACK);
+  display.fillRect(47, 155, 14, 4, GxEPD_BLACK);
+  display.fillRect(139, 155, 14, 4, GxEPD_BLACK);
+  drawUiCentered(TXT_GROWN_WORK, 169, 1);
+}
+
+void drawSetupNumber(UiText title, int value) {
   drawSetupFrame();
-  drawCentered(title, 30, 2);
+  drawUiCentered(title, 30, 2);
   drawBookDivider(54);
   display.drawRoundRect(55, 70, 90, 72, 14, GxEPD_BLACK);
   display.setTextSize(value > 99 ? 3 : 4);
@@ -758,9 +1012,8 @@ void drawSetupNumber(const __FlashStringHelper *title, int value, const __FlashS
 
 void drawSetupScreen() {
   if (screen == SET_CLOCK) {
-    drawSetupNumber(editField == 0 ? F("SET HOUR") : F("SET MINUTE"),
-                    editField == 0 ? gameClock.hour : gameClock.minute,
-                    F(""));
+    drawSetupNumber(editField == 0 ? TXT_SET_HOUR : TXT_SET_MINUTE,
+                    editField == 0 ? gameClock.hour : gameClock.minute);
   } else {
     drawSetupFrame();
     drawAnimalScaled(100, 78, (Animal)animalChoice, 0, 100);
@@ -791,156 +1044,135 @@ void drawScene() {
   }
 }
 
-void drawGameMenuRow(byte index, int y, const char *label, int textX) {
-  if (gameChoice == index) {
+void drawMenuRow(bool selected, int y, UiText label) {
+  if (selected) {
     display.fillRoundRect(17, y, 166, 28, 8, GxEPD_BLACK);
-    display.setTextColor(GxEPD_WHITE);
+    drawUiCenteredInBox(label, 17, y, 166, 28, 1, GxEPD_WHITE);
   } else {
     display.drawRoundRect(17, y, 166, 28, 8, GxEPD_BLACK);
-    display.setTextColor(GxEPD_BLACK);
+    drawUiCenteredInBox(label, 17, y, 166, 28, 1, GxEPD_BLACK);
   }
-  display.setTextSize(1);
-  display.setCursor(textX, y + 10);
-  display.print(label);
   display.setTextColor(GxEPD_BLACK);
+}
+
+void drawGameMenuRow(byte index, int y, UiText label) {
+  drawMenuRow(gameChoice == index, y, label);
+}
+
+void drawOptionRow(byte index, int y, UiText label) {
+  drawMenuRow(editField == index, y, label);
 }
 
 void drawGameMenu() {
   display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
   display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
   display.setTextColor(GxEPD_BLACK);
-  drawGameMenuRow(0, 38, "HIGHER / LOWER", 51);
-  drawGameMenuRow(1, 86, "COIN TOSS", 68);
-  drawGameMenuRow(2, 134, "SHELL GAME", 66);
+  drawGameMenuRow(0, 38, TXT_GAME_HIGH_LOW_MENU);
+  drawGameMenuRow(1, 86, TXT_GAME_COIN);
+  drawGameMenuRow(2, 134, TXT_GAME_SHELL);
 }
 
-void drawMiniGameFrame(const char *title, int titleX) {
+void drawMiniGameFrame(UiText title) {
   display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
   display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
   display.setTextColor(GxEPD_BLACK);
-  display.setTextSize(2);
-  display.setCursor(titleX, 22);
-  display.print(title);
-  display.drawLine(25, 48, 175, 48, GxEPD_BLACK);
-  display.drawPixel(31, 41, GxEPD_BLACK);
-  display.drawPixel(169, 41, GxEPD_BLACK);
-  display.drawCircle(31, 41, 3, GxEPD_BLACK);
-  display.drawCircle(169, 41, 3, GxEPD_BLACK);
+  drawUiCenteredInBox(title, 18, 18, 164, 28, 2);
+  display.drawLine(29, 50, 171, 50, GxEPD_BLACK);
+  display.drawCircle(36, 43, 3, GxEPD_BLACK);
+  display.drawCircle(164, 43, 3, GxEPD_BLACK);
 }
 
-void drawChoiceButton(int x, int y, int w, const char *label) {
+void drawChoiceButton(int x, int y, int w, UiText label) {
   display.drawRoundRect(x, y, w, 24, 7, GxEPD_BLACK);
-  display.setTextSize(1);
-  display.setCursor(x + 11, y + 8);
-  display.print(label);
+  drawUiCenteredInBox(label, x, y, w, 24, 1);
 }
 
 void drawHigherLowerGame() {
-  drawMiniGameFrame("HIGHER  LOWER", 23);
-  display.setTextSize(1);
-  display.setCursor(57, 57);
-  display.print("CURRENT CARD");
-  display.drawRoundRect(58, 70, 84, 68, 10, GxEPD_BLACK);
-  display.drawRoundRect(64, 76, 72, 56, 7, GxEPD_BLACK);
+  drawMiniGameFrame(TXT_GAME_HIGH_LOW_TITLE);
+  display.drawRoundRect(61, 61, 78, 80, 10, GxEPD_BLACK);
+  display.drawRoundRect(68, 68, 64, 66, 7, GxEPD_BLACK);
   display.setTextSize(5);
   int x = gameCurrentNumber < 10 ? 86 : 72;
-  display.setCursor(x, 86);
+  display.setCursor(x, 87);
   display.print(gameCurrentNumber);
   display.setTextSize(1);
   if (miniGamePhase == MINI_GAME_PICK) {
-    display.fillTriangle(36, 158, 25, 146, 47, 146, GxEPD_BLACK);
-    display.fillTriangle(164, 146, 153, 158, 175, 158, GxEPD_BLACK);
-    drawChoiceButton(19, 162, 70, "LOWER");
-    drawChoiceButton(111, 162, 70, "HIGHER");
+    display.fillTriangle(54, 154, 43, 143, 65, 143, GxEPD_BLACK);
+    display.fillTriangle(146, 143, 135, 154, 157, 154, GxEPD_BLACK);
+    drawChoiceButton(25, 160, 70, TXT_LOWER);
+    drawChoiceButton(105, 160, 70, TXT_HIGHER);
   } else {
-    display.drawRoundRect(68, 145, 64, 23, 6, GxEPD_BLACK);
-    display.setCursor(77, 153);
-    display.print("NEXT ");
+    display.drawRoundRect(65, 139, 70, 24, 6, GxEPD_BLACK);
+    drawUiText(TXT_NEXT, 76, 147, 1);
+    display.setCursor(106, 147);
     display.print(gameNextNumber);
-    display.fillRoundRect(31, 172, 138, 17, 5, GxEPD_BLACK);
-    display.setTextColor(GxEPD_WHITE);
-    display.setCursor(miniGameWon ? 49 : 62, 177);
-    display.print(miniGameWon ? "CORRECT +20" : "WRONG +5");
+    display.fillRoundRect(38, 168, 124, 18, 5, GxEPD_BLACK);
+    drawUiCenteredInBox(miniGameWon ? TXT_CORRECT_20 : TXT_WRONG_5, 38, 168, 124, 18, 1, GxEPD_WHITE);
     display.setTextColor(GxEPD_BLACK);
-    display.setCursor(67, 191);
-    display.print("SELECT exit");
   }
 }
 
 void drawCoinTossGame() {
-  drawMiniGameFrame("COIN TOSS", 46);
-  display.drawCircle(100, 92, 35, GxEPD_BLACK);
-  display.drawCircle(100, 89, 30, GxEPD_BLACK);
-  display.drawCircle(100, 89, 22, GxEPD_BLACK);
-  for (byte i = 0; i < 8; i++) {
-    int dx = (i % 2 == 0) ? 0 : (i < 4 ? 24 : -24);
-    int dy = (i % 2 == 1) ? 0 : (i < 4 ? 24 : -24);
-    display.drawPixel(100 + dx, 89 + dy, GxEPD_BLACK);
-  }
+  drawMiniGameFrame(TXT_GAME_COIN);
+  display.drawCircle(100, 91, 35, GxEPD_BLACK);
+  display.drawCircle(100, 91, 29, GxEPD_BLACK);
+  display.drawCircle(100, 91, 21, GxEPD_BLACK);
+  display.drawLine(82, 76, 91, 69, GxEPD_BLACK);
+  display.drawLine(109, 113, 118, 106, GxEPD_BLACK);
+  display.drawLine(76, 91, 82, 91, GxEPD_BLACK);
+  display.drawLine(118, 91, 124, 91, GxEPD_BLACK);
   display.setTextSize(3);
-  display.setCursor(91, 79);
-  if (miniGamePhase == MINI_GAME_RESULT) display.print(coinAnswer == 0 ? "H" : "T");
+  display.setCursor(91, 81);
+  if (miniGamePhase == MINI_GAME_RESULT) {
+    if (useCyrillicText()) drawUiText(coinAnswer == 0 ? TXT_COIN_HEAD_MARK : TXT_COIN_TAIL_MARK, 93, 80, 2);
+    else display.print(uiText(coinAnswer == 0 ? TXT_COIN_HEAD_MARK : TXT_COIN_TAIL_MARK));
+  }
   else display.print("?");
   display.setTextSize(1);
   if (miniGamePhase == MINI_GAME_PICK) {
-    drawChoiceButton(18, 150, 72, "HEADS");
-    drawChoiceButton(110, 150, 72, "TAILS");
-    display.fillTriangle(29, 142, 20, 133, 38, 133, GxEPD_BLACK);
-    display.fillTriangle(171, 133, 162, 142, 180, 142, GxEPD_BLACK);
+    drawChoiceButton(22, 154, 72, TXT_HEADS);
+    drawChoiceButton(106, 154, 72, TXT_TAILS);
+    display.fillTriangle(58, 146, 47, 135, 69, 135, GxEPD_BLACK);
+    display.fillTriangle(142, 135, 131, 146, 153, 146, GxEPD_BLACK);
   } else {
-    display.fillRoundRect(35, 150, 130, 18, 5, GxEPD_BLACK);
-    display.setTextColor(GxEPD_WHITE);
-    display.setCursor(miniGameWon ? 58 : 73, 156);
-    display.print(miniGameWon ? "YOU GOT IT" : "MISSED");
+    display.fillRoundRect(39, 150, 122, 18, 5, GxEPD_BLACK);
+    drawUiCenteredInBox(miniGameWon ? TXT_YOU_GOT_IT : TXT_MISSED, 39, 150, 122, 18, 1, GxEPD_WHITE);
     display.setTextColor(GxEPD_BLACK);
-    display.setCursor(miniGameWon ? 73 : 76, 174);
-    display.print(miniGameWon ? "+20 HAPPY" : "+5 HAPPY");
-    display.setCursor(67, 188);
-    display.print("SELECT exit");
+    drawUiCentered(miniGameWon ? TXT_PLUS_20_HAPPY : TXT_PLUS_5_HAPPY, 176, 1);
   }
 }
 
 void drawCup(int x, int y, bool selected, bool open, bool hasBall) {
-  if (selected) display.drawRoundRect(x - 20, y - 10, 40, 48, 8, GxEPD_BLACK);
-  display.fillRoundRect(x - 15, y + 21, 30, 5, 2, GxEPD_BLACK);
-  display.drawLine(x - 14, y, x + 14, y, GxEPD_BLACK);
-  display.drawLine(x - 14, y + 1, x + 14, y + 1, GxEPD_BLACK);
-  display.drawLine(x - 14, y, x - 9, y + 24, GxEPD_BLACK);
-  display.drawLine(x + 14, y, x + 9, y + 24, GxEPD_BLACK);
-  display.drawLine(x - 9, y + 24, x + 9, y + 24, GxEPD_BLACK);
-  display.drawLine(x - 8, y + 9, x + 8, y + 9, GxEPD_BLACK);
-  if (open) {
-    display.drawLine(x - 16, y - 8, x + 12, y - 18, GxEPD_BLACK);
-    display.drawLine(x - 15, y - 7, x + 13, y - 17, GxEPD_BLACK);
-    if (hasBall) {
-      display.fillCircle(x, y + 34, 5, GxEPD_BLACK);
-      display.drawCircle(x, y + 34, 7, GxEPD_BLACK);
-    }
+  int cupY = open ? y - 14 : y;
+  if (selected && !open) display.drawRoundRect(x - 23, cupY - 7, 46, 52, 8, GxEPD_BLACK);
+  display.drawRoundRect(x - 18, cupY, 36, 9, 4, GxEPD_BLACK);
+  display.drawLine(x - 15, cupY + 8, x - 10, cupY + 36, GxEPD_BLACK);
+  display.drawLine(x + 15, cupY + 8, x + 10, cupY + 36, GxEPD_BLACK);
+  display.drawLine(x - 10, cupY + 36, x + 10, cupY + 36, GxEPD_BLACK);
+  display.drawLine(x - 13, cupY + 18, x + 13, cupY + 18, GxEPD_BLACK);
+  display.drawLine(x - 12, cupY + 28, x + 12, cupY + 28, GxEPD_BLACK);
+  display.fillRoundRect(x - 18, cupY + 39, 36, 4, 2, GxEPD_BLACK);
+  if (open && hasBall) {
+    display.fillCircle(x, y + 37, 5, GxEPD_BLACK);
+    display.drawCircle(x, y + 37, 7, GxEPD_BLACK);
   }
 }
 
 void drawShellGame() {
-  drawMiniGameFrame("SHELL GAME", 43);
-  display.drawLine(29, 121, 171, 121, GxEPD_BLACK);
+  drawMiniGameFrame(TXT_GAME_SHELL);
+  display.drawLine(28, 126, 172, 126, GxEPD_BLACK);
   for (byte i = 0; i < 3; i++) {
-    drawCup(52 + i * 48, 79, shellPick == i, miniGamePhase == MINI_GAME_RESULT, shellAnswer == i);
+    drawCup(52 + i * 48, 77, shellPick == i, miniGamePhase == MINI_GAME_RESULT, shellAnswer == i);
   }
   display.setTextSize(1);
   if (miniGamePhase == MINI_GAME_PICK) {
-    display.setCursor(61, 135);
-    display.print("Find the ball");
-    drawChoiceButton(23, 154, 58, "MOVE");
-    drawChoiceButton(119, 154, 58, "MOVE");
-    display.setCursor(54, 184);
-    display.print("SELECT open cup");
+    drawUiCentered(TXT_FIND_BALL, 140, 1);
+    drawChoiceButton(23, 160, 58, TXT_MOVE);
+    drawChoiceButton(119, 160, 58, TXT_MOVE);
   } else {
-    display.fillRoundRect(34, 150, 132, 18, 5, GxEPD_BLACK);
-    display.setTextColor(GxEPD_WHITE);
-    display.setCursor(miniGameWon ? 55 : 62, 156);
-    display.print(miniGameWon ? "FOUND +20" : "EMPTY +5");
+    display.fillRoundRect(38, 152, 124, 18, 5, GxEPD_BLACK);
+    drawUiCenteredInBox(miniGameWon ? TXT_FOUND_20 : TXT_EMPTY_5, 38, 152, 124, 18, 1, GxEPD_WHITE);
     display.setTextColor(GxEPD_BLACK);
-    display.setCursor(67, 181);
-    display.print("SELECT exit");
   }
 }
 
@@ -951,15 +1183,10 @@ void drawGamePlay() {
 }
 
 void drawOptions() {
-  drawBookHeading(F("OPTIONS"), F("SELECT WHAT TO CHANGE"));
-  display.setTextSize(2);
-  display.setCursor(34, 96);
-  display.print(editField == 0 ? F("> SET CLOCK") : F("  SET CLOCK"));
-  display.setCursor(34, 140);
-  display.print(editField == 1 ? F("> NEW EGG") : F("  NEW EGG"));
-  display.setTextSize(1);
-  display.setCursor(40, 181);
-  display.print(F("< move   SELECT   move >"));
+  drawBookHeading(TXT_OPTIONS, TXT_CHANGE);
+  drawOptionRow(0, 94, TXT_SET_CLOCK);
+  drawOptionRow(1, 138, TXT_NEW_EGG);
+  drawUiCentered(TXT_OPTIONS_HINT, 181, 1);
 }
 
 void refreshDisplay() {
@@ -976,6 +1203,7 @@ void refreshDisplay() {
     else if (screen == GAME_MENU) drawGameMenu();
     else if (screen == GAME_PLAY) drawGamePlay();
     else if (screen == OPTIONS) drawOptions();
+    else if (screen == GROWN_UP) drawGrownUpScreen();
   } while (display.nextPage());
   display.hibernate();
   displayDirty = false;
@@ -1025,9 +1253,31 @@ void startEgg() {
   hatchMinutesLeft = random(120, 301);
   screen = EGG;
   eggFrame = 0;
+  workShortcutRightCount = 0;
+  workShortcutLeftCount = 0;
   saveGame(EGG);
   happyTune();
   displayDirty = true;
+}
+
+void resetWorkShortcut() {
+  workShortcutRightCount = 0;
+  workShortcutLeftCount = 0;
+}
+
+void enterGrownUpScreen() {
+  if (pet.ageDays < PET_ADULT_DAYS) pet.ageDays = PET_ADULT_DAYS;
+  pet.sleeping = false;
+  screen = GROWN_UP;
+  resetWorkShortcut();
+  saveGame(GROWN_UP);
+  displayDirty = true;
+}
+
+void checkAgeLimit() {
+  if (screen != EGG && screen != GROWN_UP && pet.ageDays >= PET_ADULT_DAYS) {
+    enterGrownUpScreen();
+  }
 }
 
 void advanceClock() {
@@ -1038,7 +1288,7 @@ void advanceClock() {
   if (gameClock.hour < 24) return;
   gameClock.hour = 0;
   gameClock.day++;
-  pet.ageDays++;
+  if (pet.ageDays < PET_ADULT_DAYS) pet.ageDays++;
   if (gameClock.day > daysInMonth(gameClock.month, gameClock.year)) {
     gameClock.day = 1;
     gameClock.month++;
@@ -1117,12 +1367,14 @@ void exitMiniGame() {
 
 void performAction(Action action) {
   if (action == PLAY) {
+    resetWorkShortcut();
     gameChoice = 0;
     screen = GAME_MENU;
     displayDirty = true;
     return;
   }
   if (action == SETTINGS) {
+    resetWorkShortcut();
     editField = 0;
     screen = OPTIONS;
     displayDirty = true;
@@ -1149,6 +1401,34 @@ void performAction(Action action) {
   happyTune();
 }
 
+bool handleWorkShortcut(bool left, bool select, bool right) {
+  if (select || (left && right)) {
+    resetWorkShortcut();
+    return false;
+  }
+  if (right) {
+    if (workShortcutLeftCount > 0) {
+      workShortcutRightCount = 1;
+      workShortcutLeftCount = 0;
+    } else if (workShortcutRightCount < WORK_SHORTCUT_PRESSES) {
+      workShortcutRightCount++;
+    }
+    return false;
+  }
+  if (left) {
+    if (workShortcutRightCount >= WORK_SHORTCUT_PRESSES) {
+      workShortcutLeftCount++;
+      if (workShortcutLeftCount >= WORK_SHORTCUT_PRESSES) {
+        enterGrownUpScreen();
+        return true;
+      }
+    } else {
+      resetWorkShortcut();
+    }
+  }
+  return false;
+}
+
 void changeSetupValue(int direction) {
   if (screen == LANGUAGE) {
     languageChoice = (languageChoice + 3 + direction) % 3;
@@ -1162,6 +1442,7 @@ void changeSetupValue(int direction) {
 }
 
 void handleButtons(bool left, bool select, bool right) {
+  if (screen != HOME && (left || select || right)) resetWorkShortcut();
   if (screen == LANGUAGE) {
     if (left) changeSetupValue(-1);
     if (right) changeSetupValue(1);
@@ -1188,6 +1469,16 @@ void handleButtons(bool left, bool select, bool right) {
     }
     return;
   }
+  if (screen == GROWN_UP) {
+    if (select) {
+      setupCreatesEgg = true;
+      animalChoice = animal;
+      editField = 0;
+      screen = SELECT_ANIMAL;
+      displayDirty = true;
+    }
+    return;
+  }
   if (screen == EGG) {
     if (select) {
       unsigned long now = millis();
@@ -1204,6 +1495,7 @@ void handleButtons(bool left, bool select, bool right) {
     return;
   }
   if (screen == HOME) {
+    if (handleWorkShortcut(left, select, right)) return;
     if (left) selectedAction = (Action)((selectedAction + SETTINGS - 1) % SETTINGS);
     if (right) selectedAction = (Action)((selectedAction + 1) % SETTINGS);
     if (select) performAction(selectedAction);
@@ -1261,6 +1553,7 @@ void setup() {
 #endif
   display.init(115200);
   display.setRotation(0);
+  u8g2Text.begin(display);
   if (!loadGame()) {
     screen = LANGUAGE;
     editField = 0;
@@ -1309,7 +1602,8 @@ void loop() {
     advanceClock();
     if (screen == EGG && hatchMinutesLeft > 0) hatchMinutesLeft--;
     if (screen == EGG && hatchMinutesLeft == 0) animateEggHatch();
-    if (gameClock.minute == 0) saveGame(screen == EGG ? EGG : HOME);
+    checkAgeLimit();
+    if (gameClock.minute == 0) saveGame(currentSaveStage());
     displayDirty = true;
   }
   if (now - lastNeedsTick >= NEEDS_TICK_MS) {
