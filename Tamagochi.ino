@@ -906,20 +906,11 @@ void drawAnimal(int x, int y, Animal kind, byte pose) {
   FlashAddress bitmap;
   byte width;
   byte height;
-  animalPoseBitmapInfo(kind, pet.sleeping ? POSE_SLEEP : POSE_IDLE, bitmap, width, height);
+  animalPoseBitmapInfo(kind, POSE_IDLE, bitmap, width, height);
   int scalePercent = animalDisplayScale(kind);
   int scaledWidth = width * scalePercent / 100;
   int scaledHeight = height * scalePercent / 100;
   drawScaledBitmap(x - scaledWidth / 2, top - scaledHeight / 2, bitmap, width, height, scalePercent);
-  if (pet.sleeping) {
-    display.setTextSize(1);
-    display.setCursor(x + 25, top - 34);
-    display.print(F("Z"));
-    display.setCursor(x + 31, top - 28);
-    display.print(F("Z"));
-    display.setCursor(x + 37, top - 22);
-    display.print(F("Z"));
-  }
 }
 
 void drawActionIcon(Action action, int x, int y, bool selected) {
