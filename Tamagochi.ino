@@ -58,8 +58,10 @@ const unsigned long CLOCK_TICK_MS = 60000UL;
 const unsigned long NEEDS_TICK_MS = 20UL * 60000UL;
 const unsigned long EGG_FRAME_MS = 15UL * 60000UL;
 const uint32_t SAVE_MAGIC = 0x54414D41UL;
+const byte SAVE_VERSION = 2;
 const unsigned int PET_ADULT_DAYS = 30;
 const byte WORK_SHORTCUT_PRESSES = 5;
+const unsigned int FORCED_SLEEP_MINUTES = 12U * 60U;
 
 #ifdef WOKWI_SIM
 #define GxEPD_BLACK ILI9341_BLACK
@@ -145,6 +147,8 @@ struct SaveData {
   byte stage;
   unsigned int hatchMinutesLeft;
   byte language;
+  byte version;
+  unsigned int forcedSleepMinutesLeft;
 };
 
 Button leftButton = {LEFT_PIN, HIGH, HIGH, 0};
@@ -174,6 +178,7 @@ unsigned int hatchMinutesLeft = 0;
 unsigned long lastClockTick = 0;
 unsigned long lastNeedsTick = 0;
 unsigned long lastEggFrame = 0;
+unsigned int forcedSleepMinutesLeft = 0;
 bool displayDirty = true;
 bool setupCreatesEgg = true;
 byte languageChoice = 0;
@@ -203,15 +208,48 @@ void chirp(unsigned int frequency, unsigned int duration) {
 }
 
 void playTune(const int *notes, const uint16_t *lengths, byte count) {
-  (void)notes;
-  (void)lengths;
-  (void)count;
+  for (byte i = 0; i < count; i++) {
+    int note = notes[i];
+    uint16_t length = lengths[i];
+    if (note > 0) {
+      tone(BUZZER_PIN, note, length);
+    }
+    delay(length + 35);
+    noTone(BUZZER_PIN);
+  }
 }
 
 void happyTune() {
 }
 
 void hatchTune() {
+  const int notes[] = {523, 523, 587, 523, 698, 659};
+  const uint16_t lengths[] = {180, 180, 360, 360, 360, 520};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void deepSleepTune() {
+  const int notes[] = {523, 523, 784, 784, 880, 880, 784};
+  const uint16_t lengths[] = {180, 180, 180, 180, 180, 180, 420};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void coinTune() {
+  const int notes[] = {1175, 1568};
+  const uint16_t lengths[] = {70, 120};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void lifeUpTune() {
+  const int notes[] = {659, 784, 988, 1319, 1568, 1760};
+  const uint16_t lengths[] = {90, 90, 90, 110, 110, 180};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void grownUpTune() {
+  const int notes[] = {659, 659, 698, 784, 784, 698, 659, 587, 523, 523, 587, 659, 659, 587, 587};
+  const uint16_t lengths[] = {150, 150, 150, 150, 150, 150, 150, 150, 150, 150, 150, 150, 220, 120, 360};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
 }
 
 bool pressed(Button &button) {
@@ -238,7 +276,10 @@ byte currentSaveStage() {
 }
 
 void saveGame(byte stage) {
-  SaveData data = {SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft, languageChoice};
+  SaveData data = {
+    SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft,
+    languageChoice, SAVE_VERSION, forcedSleepMinutesLeft
+  };
   EEPROM.put(0, data);
 #if defined(ESP32)
   EEPROM.commit();
@@ -256,9 +297,16 @@ bool loadGame() {
   animal = (Animal)data.animal;
   languageChoice = data.language < 3 ? data.language : 0;
   hatchMinutesLeft = data.hatchMinutesLeft;
+  forcedSleepMinutesLeft = data.version == SAVE_VERSION &&
+      data.forcedSleepMinutesLeft <= FORCED_SLEEP_MINUTES ? data.forcedSleepMinutesLeft : 0;
   if (data.stage == EGG) screen = EGG;
   else if (data.stage == GROWN_UP || pet.ageDays >= PET_ADULT_DAYS) screen = GROWN_UP;
   else screen = HOME;
+  if (screen == EGG || screen == GROWN_UP) forcedSleepMinutesLeft = 0;
+  else if (forcedSleepMinutesLeft > 0 || pet.energy == 0) {
+    if (forcedSleepMinutesLeft == 0) forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
+    pet.sleeping = true;
+  }
   return true;
 }
 
@@ -1241,6 +1289,7 @@ void animateEggHatch() {
 
 void startEgg() {
   pet = {80, 80, 80, 80, 100, 0, 0, false, false, false, 0};
+  forcedSleepMinutesLeft = 0;
   hatchMinutesLeft = random(120, 301);
   screen = EGG;
   eggFrame = 0;
@@ -1259,10 +1308,12 @@ void resetWorkShortcut() {
 void enterGrownUpScreen() {
   if (pet.ageDays < PET_ADULT_DAYS) pet.ageDays = PET_ADULT_DAYS;
   pet.sleeping = false;
+  forcedSleepMinutesLeft = 0;
   screen = GROWN_UP;
   resetWorkShortcut();
   saveGame(GROWN_UP);
   displayDirty = true;
+  grownUpTune();
 }
 
 void checkAgeLimit() {
@@ -1271,7 +1322,24 @@ void checkAgeLimit() {
   }
 }
 
+void startForcedSleep() {
+  if (screen == EGG || screen == GROWN_UP) return;
+  forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
+  pet.sleeping = true;
+  screen = HOME;
+  saveGame(HOME);
+  displayDirty = true;
+}
+
 void advanceClock() {
+  if (forcedSleepMinutesLeft > 0) {
+    forcedSleepMinutesLeft--;
+    pet.sleeping = true;
+    if (forcedSleepMinutesLeft == 0) {
+      pet.sleeping = false;
+      saveGame(HOME);
+    }
+  }
   gameClock.minute++;
   if (gameClock.minute < 60) return;
   gameClock.minute = 0;
@@ -1301,6 +1369,7 @@ void updateNeeds() {
     pet.water = clampStat(pet.water - 5);
     pet.happy = clampStat(pet.happy - 3);
     pet.energy = clampStat(pet.energy - 3);
+    if (pet.energy == 0) startForcedSleep();
   }
   if (random(0, 5) == 0 && pet.poop < 3) pet.poop++;
   if (random(0, 8) == 0) pet.dirty = true;
@@ -1315,7 +1384,8 @@ void rewardMiniGame(bool won) {
   miniGamePhase = MINI_GAME_RESULT;
   pet.happy = clampStat(pet.happy + (won ? 20 : 5));
   pet.energy = clampStat(pet.energy - 8);
-  if (won) happyTune(); else chirp(300, 160);
+  if (pet.energy == 0) startForcedSleep();
+  if (won) lifeUpTune(); else chirp(300, 160);
   saveGame(HOME);
   displayDirty = true;
 }
@@ -1377,7 +1447,11 @@ void performAction(Action action) {
   switch (action) {
     case FEED: pet.food = clampStat(pet.food + 25); break;
     case WATER: pet.water = clampStat(pet.water + 30); break;
-    case SLEEP: pet.sleeping = !pet.sleeping; pet.energy = clampStat(pet.energy + 8); break;
+    case SLEEP:
+      if (forcedSleepMinutesLeft == 0) pet.sleeping = !pet.sleeping;
+      else pet.sleeping = true;
+      pet.energy = clampStat(pet.energy + 8);
+      break;
     case OVERNIGHT: pet.sleeping = true; pet.energy = 100; pet.food = clampStat(pet.food - 8); break;
     case CLEAN: pet.poop = 0; pet.happy = clampStat(pet.happy + 5); break;
     case MEDICINE: pet.sick = false; pet.health = clampStat(pet.health + 35); break;
@@ -1388,8 +1462,9 @@ void performAction(Action action) {
     default: break;
   }
   saveGame(HOME);
+  if (action == OVERNIGHT) deepSleepTune();
+  else coinTune();
   animateAction(action);
-  happyTune();
 }
 
 bool handleWorkShortcut(bool left, bool select, bool right) {
