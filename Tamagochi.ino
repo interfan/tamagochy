@@ -81,7 +81,7 @@ GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(
 
 enum Screen : byte {
   LANGUAGE = 0, SET_CLOCK = 1, SELECT_ANIMAL = 3, EGG = 4, HATCHING = 5,
-  HOME = 6, ACTION_SCENE = 7, GAME_MENU = 8, OPTIONS = 9
+  HOME = 6, ACTION_SCENE = 7, GAME_MENU = 8, OPTIONS = 9, GAME_PLAY = 10
 };
 enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, CHICKEN, PIG, HAMSTER, PENGUIN, ANIMAL_COUNT };
 enum AnimalPose : byte { POSE_IDLE, POSE_HAPPY, POSE_SLEEP };
@@ -89,6 +89,8 @@ enum Action : byte {
   FEED, WATER, PLAY, SLEEP, OVERNIGHT, CLEAN, MEDICINE,
   LEARN, PET_ACTION, GROOM, WASH, SETTINGS, ACTION_COUNT
 };
+enum MiniGame : byte { GAME_HIGH_LOW, GAME_COIN_TOSS, GAME_SHELL, MINI_GAME_COUNT };
+enum MiniGamePhase : byte { MINI_GAME_PICK, MINI_GAME_RESULT };
 
 struct Button {
   byte pin;
@@ -141,6 +143,14 @@ Action sceneAction = FEED;
 byte editField = 0;
 byte animalChoice = 0;
 byte gameChoice = 0;
+MiniGame activeGame = GAME_HIGH_LOW;
+MiniGamePhase miniGamePhase = MINI_GAME_PICK;
+byte gameCurrentNumber = 0;
+byte gameNextNumber = 0;
+byte coinAnswer = 0;
+byte shellPick = 1;
+byte shellAnswer = 0;
+bool miniGameWon = false;
 byte eggFrame = 0;
 byte sceneFrame = 0;
 unsigned int hatchMinutesLeft = 0;
@@ -781,19 +791,163 @@ void drawScene() {
   }
 }
 
-void drawGameMenu() {
-  drawBookHeading(F("CHOOSE A GAME"), F("SELECT ONE"));
-  display.drawRoundRect(18, 84, 164, 34, 8, GxEPD_BLACK);
-  display.drawRoundRect(18, 128, 164, 34, 8, GxEPD_BLACK);
-  display.setTextSize(2);
-  display.setCursor(43, 96);
-  display.print(F("GUESS SIDE"));
-  display.setCursor(55, 140);
-  display.print(F("STOP BAR"));
-  display.drawRect(21, gameChoice == 0 ? 87 : 131, 8, 28, GxEPD_BLACK);
+void drawGameMenuRow(byte index, int y, const char *label, int textX) {
+  if (gameChoice == index) {
+    display.fillRoundRect(17, y, 166, 28, 8, GxEPD_BLACK);
+    display.setTextColor(GxEPD_WHITE);
+  } else {
+    display.drawRoundRect(17, y, 166, 28, 8, GxEPD_BLACK);
+    display.setTextColor(GxEPD_BLACK);
+  }
   display.setTextSize(1);
-  display.setCursor(36, 181);
-  display.print(F("< choose   SELECT play   choose >"));
+  display.setCursor(textX, y + 10);
+  display.print(label);
+  display.setTextColor(GxEPD_BLACK);
+}
+
+void drawGameMenu() {
+  display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
+  display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
+  display.setTextColor(GxEPD_BLACK);
+  drawGameMenuRow(0, 38, "HIGHER / LOWER", 51);
+  drawGameMenuRow(1, 86, "COIN TOSS", 68);
+  drawGameMenuRow(2, 134, "SHELL GAME", 66);
+}
+
+void drawMiniGameFrame(const char *title, int titleX) {
+  display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
+  display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
+  display.setTextColor(GxEPD_BLACK);
+  display.setTextSize(2);
+  display.setCursor(titleX, 22);
+  display.print(title);
+  display.drawLine(25, 48, 175, 48, GxEPD_BLACK);
+  display.drawPixel(31, 41, GxEPD_BLACK);
+  display.drawPixel(169, 41, GxEPD_BLACK);
+  display.drawCircle(31, 41, 3, GxEPD_BLACK);
+  display.drawCircle(169, 41, 3, GxEPD_BLACK);
+}
+
+void drawChoiceButton(int x, int y, int w, const char *label) {
+  display.drawRoundRect(x, y, w, 24, 7, GxEPD_BLACK);
+  display.setTextSize(1);
+  display.setCursor(x + 11, y + 8);
+  display.print(label);
+}
+
+void drawHigherLowerGame() {
+  drawMiniGameFrame("HIGHER  LOWER", 23);
+  display.setTextSize(1);
+  display.setCursor(57, 57);
+  display.print("CURRENT CARD");
+  display.drawRoundRect(58, 70, 84, 68, 10, GxEPD_BLACK);
+  display.drawRoundRect(64, 76, 72, 56, 7, GxEPD_BLACK);
+  display.setTextSize(5);
+  int x = gameCurrentNumber < 10 ? 86 : 72;
+  display.setCursor(x, 86);
+  display.print(gameCurrentNumber);
+  display.setTextSize(1);
+  if (miniGamePhase == MINI_GAME_PICK) {
+    display.fillTriangle(36, 158, 25, 146, 47, 146, GxEPD_BLACK);
+    display.fillTriangle(164, 146, 153, 158, 175, 158, GxEPD_BLACK);
+    drawChoiceButton(19, 162, 70, "LOWER");
+    drawChoiceButton(111, 162, 70, "HIGHER");
+  } else {
+    display.drawRoundRect(68, 145, 64, 23, 6, GxEPD_BLACK);
+    display.setCursor(77, 153);
+    display.print("NEXT ");
+    display.print(gameNextNumber);
+    display.fillRoundRect(31, 172, 138, 17, 5, GxEPD_BLACK);
+    display.setTextColor(GxEPD_WHITE);
+    display.setCursor(miniGameWon ? 49 : 62, 177);
+    display.print(miniGameWon ? "CORRECT +20" : "WRONG +5");
+    display.setTextColor(GxEPD_BLACK);
+    display.setCursor(67, 191);
+    display.print("SELECT exit");
+  }
+}
+
+void drawCoinTossGame() {
+  drawMiniGameFrame("COIN TOSS", 46);
+  display.drawCircle(100, 92, 35, GxEPD_BLACK);
+  display.drawCircle(100, 89, 30, GxEPD_BLACK);
+  display.drawCircle(100, 89, 22, GxEPD_BLACK);
+  for (byte i = 0; i < 8; i++) {
+    int dx = (i % 2 == 0) ? 0 : (i < 4 ? 24 : -24);
+    int dy = (i % 2 == 1) ? 0 : (i < 4 ? 24 : -24);
+    display.drawPixel(100 + dx, 89 + dy, GxEPD_BLACK);
+  }
+  display.setTextSize(3);
+  display.setCursor(91, 79);
+  if (miniGamePhase == MINI_GAME_RESULT) display.print(coinAnswer == 0 ? "H" : "T");
+  else display.print("?");
+  display.setTextSize(1);
+  if (miniGamePhase == MINI_GAME_PICK) {
+    drawChoiceButton(18, 150, 72, "HEADS");
+    drawChoiceButton(110, 150, 72, "TAILS");
+    display.fillTriangle(29, 142, 20, 133, 38, 133, GxEPD_BLACK);
+    display.fillTriangle(171, 133, 162, 142, 180, 142, GxEPD_BLACK);
+  } else {
+    display.fillRoundRect(35, 150, 130, 18, 5, GxEPD_BLACK);
+    display.setTextColor(GxEPD_WHITE);
+    display.setCursor(miniGameWon ? 58 : 73, 156);
+    display.print(miniGameWon ? "YOU GOT IT" : "MISSED");
+    display.setTextColor(GxEPD_BLACK);
+    display.setCursor(miniGameWon ? 73 : 76, 174);
+    display.print(miniGameWon ? "+20 HAPPY" : "+5 HAPPY");
+    display.setCursor(67, 188);
+    display.print("SELECT exit");
+  }
+}
+
+void drawCup(int x, int y, bool selected, bool open, bool hasBall) {
+  if (selected) display.drawRoundRect(x - 20, y - 10, 40, 48, 8, GxEPD_BLACK);
+  display.fillRoundRect(x - 15, y + 21, 30, 5, 2, GxEPD_BLACK);
+  display.drawLine(x - 14, y, x + 14, y, GxEPD_BLACK);
+  display.drawLine(x - 14, y + 1, x + 14, y + 1, GxEPD_BLACK);
+  display.drawLine(x - 14, y, x - 9, y + 24, GxEPD_BLACK);
+  display.drawLine(x + 14, y, x + 9, y + 24, GxEPD_BLACK);
+  display.drawLine(x - 9, y + 24, x + 9, y + 24, GxEPD_BLACK);
+  display.drawLine(x - 8, y + 9, x + 8, y + 9, GxEPD_BLACK);
+  if (open) {
+    display.drawLine(x - 16, y - 8, x + 12, y - 18, GxEPD_BLACK);
+    display.drawLine(x - 15, y - 7, x + 13, y - 17, GxEPD_BLACK);
+    if (hasBall) {
+      display.fillCircle(x, y + 34, 5, GxEPD_BLACK);
+      display.drawCircle(x, y + 34, 7, GxEPD_BLACK);
+    }
+  }
+}
+
+void drawShellGame() {
+  drawMiniGameFrame("SHELL GAME", 43);
+  display.drawLine(29, 121, 171, 121, GxEPD_BLACK);
+  for (byte i = 0; i < 3; i++) {
+    drawCup(52 + i * 48, 79, shellPick == i, miniGamePhase == MINI_GAME_RESULT, shellAnswer == i);
+  }
+  display.setTextSize(1);
+  if (miniGamePhase == MINI_GAME_PICK) {
+    display.setCursor(61, 135);
+    display.print("Find the ball");
+    drawChoiceButton(23, 154, 58, "MOVE");
+    drawChoiceButton(119, 154, 58, "MOVE");
+    display.setCursor(54, 184);
+    display.print("SELECT open cup");
+  } else {
+    display.fillRoundRect(34, 150, 132, 18, 5, GxEPD_BLACK);
+    display.setTextColor(GxEPD_WHITE);
+    display.setCursor(miniGameWon ? 55 : 62, 156);
+    display.print(miniGameWon ? "FOUND +20" : "EMPTY +5");
+    display.setTextColor(GxEPD_BLACK);
+    display.setCursor(67, 181);
+    display.print("SELECT exit");
+  }
+}
+
+void drawGamePlay() {
+  if (activeGame == GAME_HIGH_LOW) drawHigherLowerGame();
+  else if (activeGame == GAME_COIN_TOSS) drawCoinTossGame();
+  else drawShellGame();
 }
 
 void drawOptions() {
@@ -820,6 +974,7 @@ void refreshDisplay() {
     else if (screen == HOME) drawHome();
     else if (screen == ACTION_SCENE) drawScene();
     else if (screen == GAME_MENU) drawGameMenu();
+    else if (screen == GAME_PLAY) drawGamePlay();
     else if (screen == OPTIONS) drawOptions();
   } while (display.nextPage());
   display.hibernate();
@@ -895,7 +1050,7 @@ void advanceClock() {
 }
 
 void updateNeeds() {
-  if (screen != HOME && screen != ACTION_SCENE && screen != GAME_MENU) return;
+  if (screen != HOME && screen != ACTION_SCENE && screen != GAME_MENU && screen != GAME_PLAY) return;
   if (pet.sleeping) {
     pet.energy = clampStat(pet.energy + 8);
     pet.food = clampStat(pet.food - 2);
@@ -914,55 +1069,50 @@ void updateNeeds() {
   displayDirty = true;
 }
 
-void showMessage(const __FlashStringHelper *title, const __FlashStringHelper *message) {
-  display.setFullWindow();
-  display.firstPage();
+void rewardMiniGame(bool won) {
+  miniGameWon = won;
+  miniGamePhase = MINI_GAME_RESULT;
+  pet.happy = clampStat(pet.happy + (won ? 20 : 5));
+  pet.energy = clampStat(pet.energy - 8);
+  if (won) happyTune(); else chirp(300, 160);
+  saveGame(HOME);
+  displayDirty = true;
+}
+
+void startMiniGame(byte choice) {
+  activeGame = (MiniGame)choice;
+  miniGamePhase = MINI_GAME_PICK;
+  miniGameWon = false;
+  shellPick = 1;
+  shellAnswer = random(0, 3);
+  coinAnswer = random(0, 2);
+  gameCurrentNumber = random(1, 10);
   do {
-    display.fillScreen(GxEPD_WHITE);
-    drawCentered(title, 55, 2);
-    drawCentered(message, 100);
-    drawCentered(F("Press SELECT"), 160);
-  } while (display.nextPage());
-  while (!pressed(selectButton)) delay(10);
+    gameNextNumber = random(1, 10);
+  } while (gameNextNumber == gameCurrentNumber);
+  screen = GAME_PLAY;
+  displayDirty = true;
 }
 
-void runGuessGame() {
-  byte answer = random(0, 2);
-  showMessage(F("GUESS SIDE"), F("LEFT or RIGHT?"));
-  byte guess = 2;
-  while (guess == 2) {
-    if (pressed(leftButton)) guess = 0;
-    if (pressed(rightButton)) guess = 1;
-  }
-  bool won = guess == answer;
-  pet.happy = clampStat(pet.happy + (won ? 20 : 5));
-  pet.energy = clampStat(pet.energy - 8);
-  showMessage(won ? F("YOU WON!") : F("NICE TRY"), won ? F("+20 happiness") : F("+5 happiness"));
-  if (won) happyTune(); else chirp(300, 160);
+void resolveHigherLower(bool guessedHigher) {
+  if (miniGamePhase != MINI_GAME_PICK) return;
+  rewardMiniGame(guessedHigher ? gameNextNumber > gameCurrentNumber : gameNextNumber < gameCurrentNumber);
 }
 
-void runStopGame() {
-  byte marker = 0;
-  bool direction = true;
-  while (!pressed(selectButton)) {
-    display.setFullWindow();
-    display.firstPage();
-    do {
-      display.fillScreen(GxEPD_WHITE);
-      drawCentered(F("STOP IN THE MIDDLE"), 40, 2);
-      display.drawRect(20, 100, 160, 20, GxEPD_BLACK);
-      display.fillRect(92, 102, 16, 16, GxEPD_BLACK);
-      display.fillRect(22 + marker, 96, 4, 28, GxEPD_BLACK);
-    } while (display.nextPage());
-    marker += direction ? 16 : -16;
-    if (marker >= 144) direction = false;
-    if (marker == 0) direction = true;
-  }
-  bool won = marker >= 64 && marker <= 96;
-  pet.happy = clampStat(pet.happy + (won ? 20 : 5));
-  pet.energy = clampStat(pet.energy - 8);
-  showMessage(won ? F("PERFECT!") : F("NICE TRY"), won ? F("+20 happiness") : F("+5 happiness"));
-  if (won) happyTune(); else chirp(300, 160);
+void resolveCoinToss(byte guess) {
+  if (miniGamePhase != MINI_GAME_PICK) return;
+  rewardMiniGame(guess == coinAnswer);
+}
+
+void resolveShellGame() {
+  if (miniGamePhase != MINI_GAME_PICK) return;
+  rewardMiniGame(shellPick == shellAnswer);
+}
+
+void exitMiniGame() {
+  screen = HOME;
+  saveGame(HOME);
+  displayDirty = true;
 }
 
 void performAction(Action action) {
@@ -1062,12 +1212,25 @@ void handleButtons(bool left, bool select, bool right) {
     screen = HOME;
     displayDirty = true;
   } else if (screen == GAME_MENU) {
-    if (left || right) { gameChoice = !gameChoice; displayDirty = true; }
+    if (left) { gameChoice = (gameChoice + MINI_GAME_COUNT - 1) % MINI_GAME_COUNT; displayDirty = true; }
+    if (right) { gameChoice = (gameChoice + 1) % MINI_GAME_COUNT; displayDirty = true; }
     if (select) {
-      if (gameChoice == 0) runGuessGame(); else runStopGame();
-      saveGame(HOME);
-      screen = HOME;
-      displayDirty = true;
+      startMiniGame(gameChoice);
+    }
+  } else if (screen == GAME_PLAY) {
+    if (activeGame == GAME_HIGH_LOW && miniGamePhase == MINI_GAME_PICK) {
+      if (left) resolveHigherLower(false);
+      if (right) resolveHigherLower(true);
+    } else if (activeGame == GAME_COIN_TOSS && miniGamePhase == MINI_GAME_PICK) {
+      if (left) resolveCoinToss(0);
+      if (right) resolveCoinToss(1);
+    } else if (activeGame == GAME_SHELL && miniGamePhase == MINI_GAME_PICK) {
+      if (left) { shellPick = (shellPick + 2) % 3; displayDirty = true; }
+      if (right) { shellPick = (shellPick + 1) % 3; displayDirty = true; }
+    }
+    if (select) {
+      if (activeGame == GAME_SHELL && miniGamePhase == MINI_GAME_PICK) resolveShellGame();
+      else exitMiniGame();
     }
   } else if (screen == OPTIONS) {
     if (left || right) {
