@@ -1,12 +1,13 @@
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 from make_companion_bitmaps import (
     clean_species_scene_frame,
     connected_components,
     encode_rle,
     format_array,
+    load_pixel_action_frames,
     validate_rle,
 )
 
@@ -22,6 +23,10 @@ ACTIONS = ("medicine", "pet", "groom", "clean", "wash", "learn")
 ACTION_SCENE_WIDTH = 184
 ACTION_SCENE_HEIGHT = 184
 ACTION_SCENE_PADDING = 4
+ACTION_SCENE_MAX_SCALE_BOOST = 1.8
+ACTION_SUBJECT_TARGET = 132
+ACTION_FINAL_MIN_SIZE = 112
+ACTION_LINE_THRESHOLD = 176
 
 
 def action_sources(action: str) -> tuple[tuple[Path, tuple[str, ...]], ...]:
@@ -84,32 +89,101 @@ def clean_final_frame(animal: str, action: str, frame_number: int, frame: Image.
     draw = ImageDraw.Draw(cleaned)
     for min_x, min_y, max_x, max_y, center_x, count in connected_components(cleaned):
         touches_outer_edge = min_y <= 1 or min_x <= 1 or max_x >= frame.width - 1
-        if touches_outer_edge and count < 100:
+        top_read_fragment = action == "learn" and max_y <= 55
+        if top_read_fragment or (touches_outer_edge and count < 100):
             draw.rectangle((min_x, min_y, max_x - 1, max_y - 1), fill=255)
+    masks = {
+        ("pig", "learn", 3): ((0, 0, 183, 58),),
+    }
+    for rectangle in masks.get((animal, action, frame_number), ()):
+        draw.rectangle(rectangle, fill=255)
     return cleaned
 
 
-def normalize_action_frame(frame: Image.Image) -> Image.Image:
-    binary = frame.point(lambda value: 0 if value < 180 else 255)
-    bbox = ImageOps.invert(binary).getbbox()
+def finish_action_frame(frame: Image.Image) -> Image.Image:
+    ink = remove_isolated_noise(binarize_action_frame(frame))
+    bbox = ImageOps.invert(ink).getbbox()
     if not bbox:
-        return binary
-    cropped = binary.crop(bbox)
-    scale = min(
-        (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / cropped.width,
-        (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / cropped.height,
-    )
-    resized = cropped.resize(
-        (max(1, round(cropped.width * scale)), max(1, round(cropped.height * scale))),
-        Image.Resampling.LANCZOS,
-    )
-    resized = resized.point(lambda value: 0 if value < 180 else 255)
+        return ink
+    cropped = frame.crop(bbox)
+    max_dimension = max(cropped.width, cropped.height)
+    if max_dimension < ACTION_FINAL_MIN_SIZE:
+        scale = min(
+            (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / cropped.width,
+            (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / cropped.height,
+            ACTION_FINAL_MIN_SIZE / max_dimension,
+        )
+        cropped = cropped.resize(
+            (max(1, round(cropped.width * scale)), max(1, round(cropped.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
     canvas = Image.new("L", (ACTION_SCENE_WIDTH, ACTION_SCENE_HEIGHT), 255)
     canvas.paste(
-        resized,
-        ((ACTION_SCENE_WIDTH - resized.width) // 2, (ACTION_SCENE_HEIGHT - resized.height) // 2),
+        cropped,
+        ((ACTION_SCENE_WIDTH - cropped.width) // 2, (ACTION_SCENE_HEIGHT - cropped.height) // 2),
     )
-    return canvas
+    return remove_isolated_noise(binarize_action_frame(canvas))
+
+
+def subject_bbox(frame: Image.Image) -> tuple[int, int, int, int] | None:
+    ink = frame.point(lambda value: 0 if value < 190 else 255)
+    best = None
+    best_score = None
+    for min_x, min_y, max_x, max_y, center_x, count in connected_components(ink):
+        width = max_x - min_x
+        height = max_y - min_y
+        if count < 25 or width < 6 or height < 6:
+            continue
+        center_y = (min_y + max_y) / 2
+        too_high = max_y < frame.height * 0.25
+        edge_penalty = 120 if (min_x <= 2 or max_x >= frame.width - 2) else 0
+        score = count + width * height * 0.04 + center_y * 0.45 - abs(center_x - frame.width / 2) * 0.55
+        if too_high:
+            score -= 500
+        score -= edge_penalty
+        if best_score is None or score > best_score:
+            best_score = score
+            best = (min_x, min_y, max_x, max_y)
+    return best
+
+
+def action_frame_scale(frame: Image.Image, base_scale: float) -> float:
+    fit_scale = min(
+        (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / frame.width,
+        (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / frame.height,
+    )
+    subject = subject_bbox(frame)
+    if not subject:
+        return min(fit_scale, base_scale * ACTION_SCENE_MAX_SCALE_BOOST)
+    subject_width = subject[2] - subject[0]
+    subject_height = subject[3] - subject[1]
+    subject_scale = ACTION_SUBJECT_TARGET / max(subject_width, subject_height)
+    return min(fit_scale, subject_scale, base_scale * ACTION_SCENE_MAX_SCALE_BOOST)
+
+
+def binarize_action_frame(frame: Image.Image) -> Image.Image:
+    smoothed = ImageOps.autocontrast(frame)
+    smoothed = ImageEnhance.Contrast(smoothed).enhance(1.35)
+    smoothed = smoothed.filter(ImageFilter.SMOOTH)
+    return smoothed.point(lambda value: 0 if value < ACTION_LINE_THRESHOLD else 255)
+
+
+def remove_isolated_noise(frame: Image.Image) -> Image.Image:
+    subject = subject_bbox(frame)
+    if not subject:
+        return frame
+    subject_top = subject[1]
+    subject_bottom = subject[3]
+    cleaned = frame.copy()
+    draw = ImageDraw.Draw(cleaned)
+    for min_x, min_y, max_x, max_y, center_x, count in connected_components(frame):
+        width = max_x - min_x
+        height = max_y - min_y
+        tiny = count <= 12 and width <= 5 and height <= 5
+        outside_subject_y = max_y < subject_top - 4 or min_y > subject_bottom + 4
+        if tiny and outside_subject_y:
+            draw.rectangle((min_x, min_y, max_x - 1, max_y - 1), fill=255)
+    return cleaned
 
 
 def prepare_action_row(
@@ -138,14 +212,17 @@ def prepare_action_row(
         bbox = ImageOps.invert(ink).getbbox()
         cropped.append(part.crop(bbox) if bbox else part)
 
+    max_width = max(frame.width for frame in cropped)
+    max_height = max(frame.height for frame in cropped)
+    scale = min(
+        (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / max_width,
+        (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / max_height,
+    )
     prepared = []
     for frame in cropped:
-        scale = min(
-            (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / frame.width,
-            (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / frame.height,
-        )
+        frame_scale = action_frame_scale(frame, scale)
         resized = frame.resize(
-            (max(1, round(frame.width * scale)), max(1, round(frame.height * scale))),
+            (max(1, round(frame.width * frame_scale)), max(1, round(frame.height * frame_scale))),
             Image.Resampling.LANCZOS,
         )
         resized = ImageOps.autocontrast(resized)
@@ -155,7 +232,7 @@ def prepare_action_row(
             resized,
             ((ACTION_SCENE_WIDTH - resized.width) // 2, (ACTION_SCENE_HEIGHT - resized.height) // 2),
         )
-        prepared.append(canvas.point(lambda value: 0 if value < 180 else 255))
+        prepared.append(canvas)
     return prepared
 
 
@@ -177,12 +254,14 @@ def main() -> None:
         for source, animals in action_sources(action):
             with Image.open(source) as source_sheet:
                 for row, animal in enumerate(animals):
-                    frames = prepare_action_row(source_sheet, row, len(animals), action)
+                    pixel_frames = load_pixel_action_frames(animal, action)
+                    frames = pixel_frames or prepare_action_row(source_sheet, row, len(animals), action)
                     preview_sheet = Image.new("L", (ACTION_SCENE_WIDTH * 4, ACTION_SCENE_HEIGHT), 255)
                     for frame_number, frame in enumerate(frames):
-                        frame = clean_species_scene_frame(animal, action, frame_number, frame)
-                        frame = clean_final_frame(animal, action, frame_number, frame)
-                        frame = normalize_action_frame(frame)
+                        if pixel_frames is None:
+                            frame = clean_species_scene_frame(animal, action, frame_number, frame)
+                            frame = clean_final_frame(animal, action, frame_number, frame)
+                            frame = finish_action_frame(frame)
                         frame.save(PREVIEW_DIR / f"{animal}-{action}-scene-{frame_number}.png")
                         preview_sheet.paste(frame, (ACTION_SCENE_WIDTH * frame_number, 0))
 

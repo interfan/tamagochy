@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +10,9 @@ FINAL_COMPANIONS_SOURCE = ROOT / "assets" / "kawaii-final-companions.png"
 EGG_SOURCE = ROOT / "assets" / "kawaii-egg-concept.png"
 OUTPUT = ROOT / "companion_bitmaps.h"
 PREVIEW_DIR = ROOT / "assets" / "bitmap-previews"
+PIXEL_FINAL_DIR = ROOT / "assets" / "pixel-final"
+PIXEL_ANIMAL_DIR = PIXEL_FINAL_DIR / "animals"
+PIXEL_ACTION_SCENE_DIR = PIXEL_FINAL_DIR / "action-scenes"
 ACTION_SCENE_DIR = ROOT / "assets" / "action-scenes"
 SPECIES_FEED_COMPANIONS_SOURCE = ACTION_SCENE_DIR / "species-feed-companions.png"
 SPECIES_FEED_SPECIAL_SOURCE = ACTION_SCENE_DIR / "species-feed-dragon-fox-penguin.png"
@@ -24,6 +27,10 @@ ACTION_SCENES = (
 ACTION_SCENE_WIDTH = 184
 ACTION_SCENE_HEIGHT = 184
 ACTION_SCENE_PADDING = 4
+ACTION_SCENE_MAX_SCALE_BOOST = 1.8
+ACTION_SUBJECT_TARGET = 132
+ACTION_FINAL_MIN_SIZE = 112
+ACTION_LINE_THRESHOLD = 176
 SPECS = {
     "cat": {
         "crop": (0, 100, 570, 770), "width": 88, "height": 96, "threshold": 170,
@@ -98,6 +105,43 @@ def prepare_bitmap(image: Image.Image, spec: dict) -> Image.Image:
     y = height - animal.height - 1
     canvas.paste(animal, (x, y))
     return canvas.point(lambda value: 0 if value < spec["threshold"] else 255)
+
+
+def normalize_pixel_final(image: Image.Image, size: tuple[int, int], path: Path) -> Image.Image:
+    if image.size != size:
+        raise ValueError(f"{path} must be {size[0]}x{size[1]}, got {image.size[0]}x{image.size[1]}")
+    return image.convert("L").point(lambda value: 0 if value < 128 else 255)
+
+
+def load_pixel_final(path: Path, size: tuple[int, int]) -> Image.Image | None:
+    if not path.exists():
+        return None
+    with Image.open(path) as image:
+        return normalize_pixel_final(image, size, path)
+
+
+def load_pixel_final_any_size(path: Path) -> Image.Image | None:
+    if not path.exists():
+        return None
+    with Image.open(path) as image:
+        return normalize_pixel_final(image, image.size, path)
+
+
+def load_pixel_animal(name: str, size: tuple[int, int] | None = None, pose: str | None = None) -> Image.Image | None:
+    suffix = f"-{pose}" if pose else ""
+    path = PIXEL_ANIMAL_DIR / f"{name}{suffix}.png"
+    if not path.exists():
+        return None
+    with Image.open(path) as image:
+        expected_size = size if size is not None else image.size
+        return normalize_pixel_final(image, expected_size, path)
+
+
+def load_pixel_action_frames(animal: str, action: str) -> list[Image.Image] | None:
+    paths = [PIXEL_ACTION_SCENE_DIR / f"{animal}-{action}-{frame}.png" for frame in range(4)]
+    if not all(path.exists() for path in paths):
+        return None
+    return [load_pixel_final(path, (ACTION_SCENE_WIDTH, ACTION_SCENE_HEIGHT)) for path in paths]
 
 
 def encode_bitmap(image: Image.Image, width: int, height: int) -> list[int]:
@@ -217,14 +261,17 @@ def prepare_action_frames(
             bbox = ImageOps.invert(ink).getbbox()
             cropped.append(part.crop(bbox) if bbox else part)
 
+    max_width = max(frame.width for frame in cropped)
+    max_height = max(frame.height for frame in cropped)
+    scale = min(
+        (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / max_width,
+        (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / max_height,
+    )
     prepared = []
     for frame in cropped:
-        scale = min(
-            (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / frame.width,
-            (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / frame.height,
-        )
+        frame_scale = action_frame_scale(frame, scale)
         resized = frame.resize(
-            (max(1, round(frame.width * scale)), max(1, round(frame.height * scale))),
+            (max(1, round(frame.width * frame_scale)), max(1, round(frame.height * frame_scale))),
             Image.Resampling.LANCZOS,
         )
         resized = ImageOps.autocontrast(resized)
@@ -233,7 +280,7 @@ def prepare_action_frames(
         x = (ACTION_SCENE_WIDTH - resized.width) // 2
         y = (ACTION_SCENE_HEIGHT - resized.height) // 2
         canvas.paste(resized, (x, y))
-        prepared.append(canvas.point(lambda value: 0 if value < 180 else 255))
+        prepared.append(canvas)
     return prepared
 
 
@@ -253,12 +300,19 @@ def prepare_grid_action_frames(image: Image.Image, row: int, row_count: int) -> 
         ink = part.point(lambda value: 0 if value < 225 else 255)
         bbox = ImageOps.invert(ink).getbbox()
         part = part.crop(bbox) if bbox else part
-        scale = min(
-            (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / part.width,
-            (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / part.height,
-        )
+        prepared.append(part)
+
+    max_width = max(part.width for part in prepared)
+    max_height = max(part.height for part in prepared)
+    scale = min(
+        (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / max_width,
+        (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / max_height,
+    )
+    centered = []
+    for part in prepared:
+        frame_scale = action_frame_scale(part, scale)
         resized = part.resize(
-            (max(1, round(part.width * scale)), max(1, round(part.height * scale))),
+            (max(1, round(part.width * frame_scale)), max(1, round(part.height * frame_scale))),
             Image.Resampling.LANCZOS,
         )
         resized = ImageOps.autocontrast(resized)
@@ -267,29 +321,92 @@ def prepare_grid_action_frames(image: Image.Image, row: int, row_count: int) -> 
         x = (ACTION_SCENE_WIDTH - resized.width) // 2
         y = (ACTION_SCENE_HEIGHT - resized.height) // 2
         frame.paste(resized, (x, y))
-        prepared.append(frame.point(lambda value: 0 if value < 180 else 255))
-    return prepared
+        centered.append(frame)
+    return centered
 
 
-def normalize_action_frame(frame: Image.Image) -> Image.Image:
-    binary = frame.point(lambda value: 0 if value < 180 else 255)
-    bbox = ImageOps.invert(binary).getbbox()
+def subject_bbox(frame: Image.Image) -> tuple[int, int, int, int] | None:
+    ink = frame.point(lambda value: 0 if value < 190 else 255)
+    best = None
+    best_score = None
+    for min_x, min_y, max_x, max_y, center_x, count in connected_components(ink):
+        width = max_x - min_x
+        height = max_y - min_y
+        if count < 25 or width < 6 or height < 6:
+            continue
+        center_y = (min_y + max_y) / 2
+        too_high = max_y < frame.height * 0.25
+        edge_penalty = 120 if (min_x <= 2 or max_x >= frame.width - 2) else 0
+        score = count + width * height * 0.04 + center_y * 0.45 - abs(center_x - frame.width / 2) * 0.55
+        if too_high:
+            score -= 500
+        score -= edge_penalty
+        if best_score is None or score > best_score:
+            best_score = score
+            best = (min_x, min_y, max_x, max_y)
+    return best
+
+
+def action_frame_scale(frame: Image.Image, base_scale: float) -> float:
+    fit_scale = min(
+        (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / frame.width,
+        (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / frame.height,
+    )
+    subject = subject_bbox(frame)
+    if not subject:
+        return min(fit_scale, base_scale * ACTION_SCENE_MAX_SCALE_BOOST)
+    subject_width = subject[2] - subject[0]
+    subject_height = subject[3] - subject[1]
+    subject_scale = ACTION_SUBJECT_TARGET / max(subject_width, subject_height)
+    return min(fit_scale, subject_scale, base_scale * ACTION_SCENE_MAX_SCALE_BOOST)
+
+
+def binarize_action_frame(frame: Image.Image) -> Image.Image:
+    smoothed = ImageOps.autocontrast(frame)
+    smoothed = ImageEnhance.Contrast(smoothed).enhance(1.35)
+    smoothed = smoothed.filter(ImageFilter.SMOOTH)
+    return smoothed.point(lambda value: 0 if value < ACTION_LINE_THRESHOLD else 255)
+
+
+def remove_isolated_noise(frame: Image.Image) -> Image.Image:
+    subject = subject_bbox(frame)
+    if not subject:
+        return frame
+    subject_top = subject[1]
+    subject_bottom = subject[3]
+    cleaned = frame.copy()
+    draw = ImageDraw.Draw(cleaned)
+    for min_x, min_y, max_x, max_y, center_x, count in connected_components(frame):
+        width = max_x - min_x
+        height = max_y - min_y
+        tiny = count <= 12 and width <= 5 and height <= 5
+        outside_subject_y = max_y < subject_top - 4 or min_y > subject_bottom + 4
+        if tiny and outside_subject_y:
+            draw.rectangle((min_x, min_y, max_x - 1, max_y - 1), fill=255)
+    return cleaned
+
+
+def finish_action_frame(frame: Image.Image) -> Image.Image:
+    ink = remove_isolated_noise(binarize_action_frame(frame))
+    bbox = ImageOps.invert(ink).getbbox()
     if not bbox:
-        return binary
-    cropped = binary.crop(bbox)
-    scale = min(
-        (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / cropped.width,
-        (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / cropped.height,
-    )
-    resized = cropped.resize(
-        (max(1, round(cropped.width * scale)), max(1, round(cropped.height * scale))),
-        Image.Resampling.LANCZOS,
-    )
-    resized = resized.point(lambda value: 0 if value < 180 else 255)
+        return ink
+    cropped = frame.crop(bbox)
+    max_dimension = max(cropped.width, cropped.height)
+    if max_dimension < ACTION_FINAL_MIN_SIZE:
+        scale = min(
+            (ACTION_SCENE_WIDTH - ACTION_SCENE_PADDING) / cropped.width,
+            (ACTION_SCENE_HEIGHT - ACTION_SCENE_PADDING) / cropped.height,
+            ACTION_FINAL_MIN_SIZE / max_dimension,
+        )
+        cropped = cropped.resize(
+            (max(1, round(cropped.width * scale)), max(1, round(cropped.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
     canvas = Image.new("L", (ACTION_SCENE_WIDTH, ACTION_SCENE_HEIGHT), 255)
-    canvas.paste(resized, ((ACTION_SCENE_WIDTH - resized.width) // 2,
-                           (ACTION_SCENE_HEIGHT - resized.height) // 2))
-    return canvas
+    canvas.paste(cropped, ((ACTION_SCENE_WIDTH - cropped.width) // 2,
+                           (ACTION_SCENE_HEIGHT - cropped.height) // 2))
+    return remove_isolated_noise(binarize_action_frame(canvas))
 
 
 def clean_action_frame(action: str, frame_number: int, frame: Image.Image) -> Image.Image:
@@ -338,8 +455,12 @@ def clean_species_scene_frame(animal: str, action: str, frame_number: int, frame
 def blink_pose(bitmap: Image.Image, spec: dict) -> Image.Image:
     pose = bitmap.copy()
     draw = ImageDraw.Draw(pose)
-    radius = spec.get("eye_radius", 4)
+    scale_x = bitmap.width / spec["width"]
+    scale_y = bitmap.height / spec["height"]
+    radius = max(1, round(spec.get("eye_radius", 4) * min(scale_x, scale_y)))
     for x, y in spec["eyes"]:
+        x = round(x * scale_x)
+        y = round(y * scale_y)
         draw.rectangle((x - radius, y - radius, x + radius, y + radius), fill=255)
         draw.arc((x - radius, y - 2, x + radius, y + 5), 195, 345, fill=0, width=1)
     return pose
@@ -364,21 +485,25 @@ def eat_pose(bitmap: Image.Image, spec: dict) -> Image.Image:
 def happy_pose(bitmap: Image.Image, spec: dict, animal: str) -> Image.Image:
     pose = blink_pose(bitmap, spec)
     draw = ImageDraw.Draw(pose)
-    mx, my = spec["mouth"]
+    scale_x = bitmap.width / spec["width"]
+    scale_y = bitmap.height / spec["height"]
+    mx, my = round(spec["mouth"][0] * scale_x), round(spec["mouth"][1] * scale_y)
     draw.rectangle((mx - 5, my - 4, mx + 5, my + 5), fill=255)
     draw.arc((mx - 5, my - 5, mx + 5, my + 5), 15, 165, fill=0, width=2)
     if animal == "cat":
-        draw.rectangle((0, 51, 30, 80), fill=255)
-        draw.arc((2, 45, 27, 70), 80, 285, fill=0, width=2)
-        draw.arc((7, 50, 22, 65), 80, 285, fill=0, width=1)
-        draw.line((22, 64, 31, 72), fill=0, width=2)
+        draw.rectangle((0, round(51 * scale_y), round(30 * scale_x), round(80 * scale_y)), fill=255)
+        draw.arc((round(2 * scale_x), round(45 * scale_y), round(27 * scale_x), round(70 * scale_y)), 80, 285, fill=0, width=2)
+        draw.arc((round(7 * scale_x), round(50 * scale_y), round(22 * scale_x), round(65 * scale_y)), 80, 285, fill=0, width=1)
+        draw.line((round(22 * scale_x), round(64 * scale_y), round(31 * scale_x), round(72 * scale_y)), fill=0, width=2)
     return pose
 
 
 def sleep_pose(bitmap: Image.Image, spec: dict) -> Image.Image:
     pose = blink_pose(bitmap, spec)
     draw = ImageDraw.Draw(pose)
-    mx, my = spec["mouth"]
+    scale_x = bitmap.width / spec["width"]
+    scale_y = bitmap.height / spec["height"]
+    mx, my = round(spec["mouth"][0] * scale_x), round(spec["mouth"][1] * scale_y)
     draw.rectangle((mx - 5, my - 4, mx + 5, my + 5), fill=255)
     draw.ellipse((mx - 3, my - 2, mx + 3, my + 4), outline=0, width=2)
     return pose
@@ -439,22 +564,25 @@ def prepare_companion_from_scene(scene: Image.Image, width: int, height: int) ->
 
 
 def append_prepared_companion(output: list[str], bitmap: Image.Image, name: str, spec: dict) -> None:
+    bitmap = load_pixel_animal(name) or bitmap
+    width, height = bitmap.size
     bitmap.save(PREVIEW_DIR / f"{name}.png")
     prefix = name.upper()
-    output.append(f"const uint8_t {prefix}_WIDTH = {spec['width']};")
-    output.append(f"const uint8_t {prefix}_HEIGHT = {spec['height']};")
+    output.append(f"const uint8_t {prefix}_WIDTH = {width};")
+    output.append(f"const uint8_t {prefix}_HEIGHT = {height};")
     output.append(format_array(
         f"{prefix}_BITMAP",
-        encode_bitmap(bitmap, spec["width"], spec["height"]),
+        encode_bitmap(bitmap, width, height),
     ))
-    for pose_name, pose in (
+    for pose_name, generated_pose in (
         ("HAPPY", happy_pose(bitmap, spec, name)),
         ("SLEEP", sleep_pose(bitmap, spec)),
     ):
+        pose = load_pixel_animal(name, (width, height), pose_name.lower()) or generated_pose
         pose.save(PREVIEW_DIR / f"{name}-{pose_name.lower()}.png")
         output.append(format_array(
             f"{prefix}_{pose_name}_BITMAP",
-            encode_bitmap(pose, spec["width"], spec["height"]),
+            encode_bitmap(pose, width, height),
         ))
 
 
@@ -559,10 +687,13 @@ def main() -> None:
         for source_path, animals in scene_sheets:
             sheet = Image.open(source_path)
             for row, animal in enumerate(animals):
+                pixel_frames = load_pixel_action_frames(animal, action)
+                prepared_frames = pixel_frames or prepare_grid_action_frames(sheet, row, len(animals))
                 contact_sheet = Image.new("L", (ACTION_SCENE_WIDTH * 4, ACTION_SCENE_HEIGHT), 255)
-                for frame_number, frame in enumerate(prepare_grid_action_frames(sheet, row, len(animals))):
-                    frame = clean_species_scene_frame(animal, action, frame_number, frame)
-                    frame = normalize_action_frame(frame)
+                for frame_number, frame in enumerate(prepared_frames):
+                    if pixel_frames is None:
+                        frame = clean_species_scene_frame(animal, action, frame_number, frame)
+                        frame = finish_action_frame(frame)
                     frame.save(PREVIEW_DIR / f"{animal}-{action}-scene-{frame_number}.png")
                     contact_sheet.paste(frame, (ACTION_SCENE_WIDTH * frame_number, 0))
                     runs = encode_rle(frame)
@@ -581,14 +712,16 @@ def main() -> None:
             ((1400, 140, 1915, 625), [(0, 0, 55, 365)]),
         ]
         source_frames = feed_source_frames if action == "feed" else None
-        frames = prepare_action_frames(
+        pixel_frames = load_pixel_action_frames("cat", action)
+        frames = pixel_frames or prepare_action_frames(
             Image.open(ACTION_SCENE_DIR / f"{action}.png"),
             source_frames=source_frames,
         )
         contact_sheet = Image.new("L", (ACTION_SCENE_WIDTH * 4, ACTION_SCENE_HEIGHT), 255)
         for frame_number, frame in enumerate(frames):
-            frame = clean_action_frame(action, frame_number, frame)
-            frame = normalize_action_frame(frame)
+            if pixel_frames is None:
+                frame = clean_action_frame(action, frame_number, frame)
+                frame = finish_action_frame(frame)
             frame.save(PREVIEW_DIR / f"cat-{action}-{frame_number}.png")
             contact_sheet.paste(frame, (ACTION_SCENE_WIDTH * frame_number, 0))
             if action != "overnight":
@@ -602,11 +735,11 @@ def main() -> None:
 
     egg_source = Image.open(EGG_SOURCE)
     egg_spec = {"crop": (80, 55, 1175, 1190), "width": 92, "height": 100, "threshold": 165}
-    egg = prepare_bitmap(egg_source, egg_spec)
+    egg = load_pixel_final_any_size(PIXEL_FINAL_DIR / "egg.png") or prepare_bitmap(egg_source, egg_spec)
     egg.save(PREVIEW_DIR / "egg.png")
-    output.append("const uint8_t EGG_WIDTH = 92;")
-    output.append("const uint8_t EGG_HEIGHT = 100;")
-    output.append(format_array("EGG_BITMAP", encode_bitmap(egg, 92, 100)))
+    output.append(f"const uint8_t EGG_WIDTH = {egg.width};")
+    output.append(f"const uint8_t EGG_HEIGHT = {egg.height};")
+    output.append(format_array("EGG_BITMAP", encode_bitmap(egg, egg.width, egg.height)))
 
     OUTPUT.write_text("\n".join(output), encoding="ascii")
 

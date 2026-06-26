@@ -633,19 +633,7 @@ void animalPoseBitmapInfo(Animal kind, AnimalPose pose, FlashAddress &bitmap, by
 }
 
 int animalDisplayScale(Animal kind) {
-  switch (kind) {
-    case CAT: return 111;
-    case DOG: return 100;
-    case BUNNY: return 96;
-    case PANDA: return 145;
-    case DRAGON: return 131;
-    case FOX: return 131;
-    case CHICKEN: return 131;
-    case PIG: return 142;
-    case HAMSTER: return 106;
-    case PENGUIN: return 104;
-    default: return 100;
-  }
+  return 100;
 }
 
 void drawAnimalScaled(int x, int y, Animal kind, byte pose, int scalePercent) {
@@ -776,7 +764,7 @@ void drawSetupScreen() {
 }
 
 void drawEggScreen() {
-  drawEggScaled(100, 103, eggFrame, 130);
+  drawEggScaled(100, 100, eggFrame, 100);
 }
 
 void drawScene() {
@@ -861,7 +849,7 @@ void animateEggHatch() {
     do {
       display.fillScreen(GxEPD_WHITE);
       if (frame < 3) {
-        drawEggScaled(100, 103, frame, 130);
+        drawEggScaled(100, 100, frame, 100);
       } else {
         drawAnimalScaled(100, 96, animal, 1, 100);
         drawHeart(24, 54);

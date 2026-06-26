@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "assets" / "action-icons.png"
 OUTPUT = ROOT / "action_icons.h"
 PREVIEW_DIR = ROOT / "assets" / "bitmap-previews"
+PIXEL_ICON_DIR = ROOT / "assets" / "pixel-final" / "icons"
 ICON_WIDTH = 28
 ICON_HEIGHT = 24
 
@@ -39,6 +40,16 @@ def prepare_icon(source: Image.Image, crop: tuple[int, int, int, int]) -> Image.
     canvas = Image.new("L", (ICON_WIDTH, ICON_HEIGHT), 255)
     canvas.paste(icon, ((ICON_WIDTH - icon.width) // 2, (ICON_HEIGHT - icon.height) // 2))
     return canvas
+
+
+def load_pixel_icon(name: str) -> Image.Image | None:
+    path = PIXEL_ICON_DIR / f"{name}.png"
+    if not path.exists():
+        return None
+    with Image.open(path) as image:
+        if image.size != (ICON_WIDTH, ICON_HEIGHT):
+            raise ValueError(f"{path} must be {ICON_WIDTH}x{ICON_HEIGHT}, got {image.size[0]}x{image.size[1]}")
+        return image.convert("L").point(lambda value: 0 if value < 128 else 255)
 
 
 def encode_bitmap(image: Image.Image) -> list[int]:
@@ -86,7 +97,7 @@ def main() -> None:
     ]
 
     for index, (name, crop) in enumerate(ICON_CROPS.items()):
-        icon = prepare_icon(source, crop)
+        icon = load_pixel_icon(name) or prepare_icon(source, crop)
         icon.save(PREVIEW_DIR / f"action-icon-{name}.png")
         contact_sheet.paste(icon, (index * ICON_WIDTH, 0))
         output.append(format_array(f"ACTION_{name.upper()}_ICON_BITMAP", encode_bitmap(icon)))
