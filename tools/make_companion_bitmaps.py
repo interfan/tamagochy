@@ -58,10 +58,6 @@ NEW_COMPANION_SPECS = {
         "crop": (805, 115, 1210, 650), "width": 96, "height": 100, "threshold": 165,
         "eyes": [(41, 48), (56, 48)], "eye_radius": 6, "mouth": (49, 57),
     },
-    "chicken": {
-        "crop": (1210, 135, 1570, 650), "width": 96, "height": 100, "threshold": 165,
-        "eyes": [(42, 46), (56, 46)], "eye_radius": 6, "mouth": (49, 57),
-    },
     "pig": {
         "crop": (1570, 145, 1950, 650), "width": 96, "height": 100, "threshold": 165,
         "eyes": [(41, 48), (57, 48)], "eye_radius": 6, "mouth": (49, 58),
@@ -78,15 +74,15 @@ FINAL_COMPANION_SPECS = {
     },
 }
 SPECIES_FEED_SHEETS = (
-    (SPECIES_FEED_COMPANIONS_SOURCE, ("dog", "bunny", "panda", "chicken", "pig", "hamster")),
+    (SPECIES_FEED_COMPANIONS_SOURCE, ("dog", "bunny", "panda", "pig", "hamster")),
     (SPECIES_FEED_SPECIAL_SOURCE, ("dragon", "fox", "penguin")),
 )
 SPECIES_WATER_SHEETS = (
-    (SPECIES_WATER_COMPANIONS_SOURCE, ("dog", "bunny", "panda", "chicken", "pig", "hamster")),
+    (SPECIES_WATER_COMPANIONS_SOURCE, ("dog", "bunny", "panda", "pig", "hamster")),
     (SPECIES_WATER_SPECIAL_SOURCE, ("dragon", "fox", "penguin")),
 )
 SPECIES_SLEEP_SHEETS = (
-    (SPECIES_SLEEP_COMPANIONS_SOURCE, ("dog", "bunny", "panda", "chicken", "pig", "hamster")),
+    (SPECIES_SLEEP_COMPANIONS_SOURCE, ("dog", "bunny", "panda", "pig", "hamster")),
     (SPECIES_SLEEP_SPECIAL_SOURCE, ("dragon", "fox", "penguin")),
 )
 
@@ -435,11 +431,9 @@ def clean_species_scene_frame(animal: str, action: str, frame_number: int, frame
         draw.line((56, 89, 59, 96), fill=0, width=1)
         draw.line((67, 87, 70, 93), fill=0, width=1)
         draw.rectangle((47, 100, 83, 107), fill=255)
-    if action == "water" and animal == "chicken" and frame_number < 3:
-        draw.rectangle((0, 0, 183, 20), fill=255)
     if action == "sleep" and frame_number < 3:
         clear_top = animal in ("panda", "bunny") or \
-            (animal in ("pig", "chicken") and frame_number > 0)
+            (animal == "pig" and frame_number > 0)
         if clear_top:
             draw.rectangle((0, 0, 183, 25), fill=255)
     if action == "sleep" and animal in ("panda", "bunny"):

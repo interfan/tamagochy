@@ -10,7 +10,7 @@ ANIMAL_DIR = PIXEL_FINAL_DIR / "animals"
 ACTION_SCENE_DIR = PIXEL_FINAL_DIR / "action-scenes"
 ICON_DIR = PIXEL_FINAL_DIR / "icons"
 
-ANIMALS = ("cat", "dog", "bunny", "panda", "dragon", "fox", "chicken", "pig", "hamster", "penguin")
+ANIMALS = ("cat", "dog", "bunny", "panda", "dragon", "fox", "pig", "hamster", "penguin")
 ANIMAL_POSES = ("", "happy", "sleep")
 SPECIES_ACTIONS = ("feed", "water", "sleep", "medicine", "pet", "groom", "clean", "wash", "learn")
 CAT_ACTIONS = ("feed", "water", "sleep", "overnight", "clean", "medicine", "learn", "pet", "groom", "wash")

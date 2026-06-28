@@ -27,7 +27,15 @@ SCENE_SIZE = 184
 SOURCE_THRESHOLD = 145
 FINAL_THRESHOLD = 150
 
-REFERENCE_ROWS = ("dog", "bunny", "panda", "dragon", "fox", "chicken", "pig", "penguin")
+REFERENCE_ROWS = (
+    ("dog", 0),
+    ("bunny", 1),
+    ("panda", 2),
+    ("dragon", 3),
+    ("fox", 4),
+    ("pig", 6),
+    ("penguin", 7),
+)
 ROW_CENTERS = (78, 199, 319, 439, 559, 681, 803, 925)
 ROW_BOUNDS = (0,) + tuple(
     round((ROW_CENTERS[index] + ROW_CENTERS[index + 1]) / 2)
@@ -173,7 +181,7 @@ def generated_species_frames() -> dict[str, list[Image.Image]]:
     with Image.open(SPECIES_REFERENCE) as sheet:
         source = binarize_source(sheet)
         components = source_components(source)
-        for row, animal in enumerate(REFERENCE_ROWS):
+        for animal, row in REFERENCE_ROWS:
             frames[animal] = [
                 clear_manual_artifacts(
                     extract_species_frame(source, components, row, column),

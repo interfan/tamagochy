@@ -2,7 +2,7 @@
 
 A small original companion game for an Arduino Mega 2560 with a 1.54-inch
 e-paper screen. It has
-an animated egg and hatch sequence, ten original animal designs, care
+an animated egg and hatch sequence, nine original animal designs, care
 activities, music, two minigames, a clock setup, and EEPROM saves.
 
 At startup, choose English, Bulgarian, or German. The selected language is
@@ -96,7 +96,7 @@ Use `3.3V` unless your particular module explicitly states that it accepts
 ## First Start
 
 Set the time and choose a cat, dog, bunny, panda, dragon, fox,
-chicken, pig, hamster, or penguin. An egg then appears and hatches after a
+pig, hamster, or penguin. An egg then appears and hatches after a
 random **2 to 5 hours** while the Mega is powered. The egg periodically changes
 pose, followed by an animated musical hatch.
 

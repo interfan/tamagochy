@@ -17,7 +17,7 @@ SOURCE_DIR = ROOT / "assets" / "action-scenes"
 PREVIEW_DIR = ROOT / "assets" / "bitmap-previews"
 OUTPUT = ROOT / "species_action_bitmaps.h"
 
-COMPANION_ANIMALS = ("dog", "bunny", "panda", "chicken", "pig", "hamster")
+COMPANION_ANIMALS = ("dog", "bunny", "panda", "pig", "hamster")
 SPECIAL_ANIMALS = ("dragon", "fox", "penguin")
 ACTIONS = ("medicine", "pet", "groom", "clean", "wash", "learn")
 ACTION_SCENE_WIDTH = 184

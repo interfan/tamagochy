@@ -58,7 +58,7 @@ const unsigned long CLOCK_TICK_MS = 60000UL;
 const unsigned long NEEDS_TICK_MS = 20UL * 60000UL;
 const unsigned long EGG_FRAME_MS = 15UL * 60000UL;
 const uint32_t SAVE_MAGIC = 0x54414D41UL;
-const byte SAVE_VERSION = 2;
+const byte SAVE_VERSION = 3;
 const unsigned int PET_ADULT_DAYS = 30;
 const byte WORK_SHORTCUT_PRESSES = 5;
 const unsigned int FORCED_SLEEP_MINUTES = 12U * 60U;
@@ -90,7 +90,7 @@ enum Screen : byte {
   HOME = 6, ACTION_SCENE = 7, GAME_MENU = 8, OPTIONS = 9, GAME_PLAY = 10,
   GROWN_UP = 11
 };
-enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, CHICKEN, PIG, HAMSTER, PENGUIN, ANIMAL_COUNT };
+enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, PIG, HAMSTER, PENGUIN, ANIMAL_COUNT };
 enum AnimalPose : byte { POSE_IDLE, POSE_HAPPY, POSE_SLEEP };
 enum Action : byte {
   FEED, WATER, PLAY, SLEEP, OVERNIGHT, CLEAN, MEDICINE,
@@ -289,15 +289,21 @@ void saveGame(byte stage) {
 bool loadGame() {
   SaveData data;
   EEPROM.get(0, data);
-  if (data.magic != SAVE_MAGIC || data.animal >= ANIMAL_COUNT || !savedStageValid(data.stage)) {
+  if (data.magic != SAVE_MAGIC || !savedStageValid(data.stage)) {
     return false;
   }
   gameClock = data.clock;
   pet = data.pet;
-  animal = (Animal)data.animal;
+  byte savedAnimal = data.animal;
+  if (data.version != SAVE_VERSION) {
+    if (savedAnimal == 6) savedAnimal = CAT;
+    else if (savedAnimal > 6) savedAnimal--;
+  }
+  if (savedAnimal >= ANIMAL_COUNT) return false;
+  animal = (Animal)savedAnimal;
   languageChoice = data.language < 3 ? data.language : 0;
   hatchMinutesLeft = data.hatchMinutesLeft;
-  forcedSleepMinutesLeft = data.version == SAVE_VERSION &&
+  forcedSleepMinutesLeft = (data.version == 2 || data.version == SAVE_VERSION) &&
       data.forcedSleepMinutesLeft <= FORCED_SLEEP_MINUTES ? data.forcedSleepMinutesLeft : 0;
   if (data.stage == EGG) screen = EGG;
   else if (data.stage == GROWN_UP || pet.ageDays >= PET_ADULT_DAYS) screen = GROWN_UP;
@@ -318,7 +324,6 @@ const __FlashStringHelper *animalName(Animal kind) {
     case PANDA: return F("PO");
     case DRAGON: return F("EMBER");
     case FOX: return F("FEN");
-    case CHICKEN: return F("PIPPI");
     case PIG: return F("TRUFFLE");
     case HAMSTER: return F("NIBBLE");
     case PENGUIN: return F("PIPER");
@@ -882,7 +887,6 @@ FlashAddress speciesActionFrame(Animal kind, Action action, byte frame) {
     case PANDA: return ANIMAL_ACTION_FRAME(PANDA);
     case DRAGON: return ANIMAL_ACTION_FRAME(DRAGON);
     case FOX: return ANIMAL_ACTION_FRAME(FOX);
-    case CHICKEN: return ANIMAL_ACTION_FRAME(CHICKEN);
     case PIG: return ANIMAL_ACTION_FRAME(PIG);
     case HAMSTER: return ANIMAL_ACTION_FRAME(HAMSTER);
     case PENGUIN: return ANIMAL_ACTION_FRAME(PENGUIN);
@@ -903,7 +907,6 @@ void animalBitmapInfo(Animal kind, FlashAddress &bitmap, byte &width, byte &heig
     case PANDA: bitmap = FLASH_ADDRESS(PANDA_BITMAP); width = PANDA_WIDTH; height = PANDA_HEIGHT; break;
     case DRAGON: bitmap = FLASH_ADDRESS(DRAGON_BITMAP); width = DRAGON_WIDTH; height = DRAGON_HEIGHT; break;
     case FOX: bitmap = FLASH_ADDRESS(FOX_BITMAP); width = FOX_WIDTH; height = FOX_HEIGHT; break;
-    case CHICKEN: bitmap = FLASH_ADDRESS(CHICKEN_BITMAP); width = CHICKEN_WIDTH; height = CHICKEN_HEIGHT; break;
     case PIG: bitmap = FLASH_ADDRESS(PIG_BITMAP); width = PIG_WIDTH; height = PIG_HEIGHT; break;
     case HAMSTER: bitmap = FLASH_ADDRESS(HAMSTER_BITMAP); width = HAMSTER_WIDTH; height = HAMSTER_HEIGHT; break;
     case PENGUIN: bitmap = FLASH_ADDRESS(PENGUIN_BITMAP); width = PENGUIN_WIDTH; height = PENGUIN_HEIGHT; break;
@@ -923,7 +926,6 @@ void animalPoseBitmapInfo(Animal kind, AnimalPose pose, FlashAddress &bitmap, by
     case PANDA: SET_ANIMAL_POSE(PANDA); break;
     case DRAGON: SET_ANIMAL_POSE(DRAGON); break;
     case FOX: SET_ANIMAL_POSE(FOX); break;
-    case CHICKEN: SET_ANIMAL_POSE(CHICKEN); break;
     case PIG: SET_ANIMAL_POSE(PIG); break;
     case HAMSTER: SET_ANIMAL_POSE(HAMSTER); break;
     case PENGUIN: SET_ANIMAL_POSE(PENGUIN); break;
