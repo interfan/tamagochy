@@ -58,10 +58,41 @@ const unsigned long CLOCK_TICK_MS = 60000UL;
 const unsigned long NEEDS_TICK_MS = 20UL * 60000UL;
 const unsigned long EGG_FRAME_MS = 15UL * 60000UL;
 const uint32_t SAVE_MAGIC = 0x54414D41UL;
-const byte SAVE_VERSION = 3;
+const byte SAVE_VERSION = 8;
 const unsigned int PET_ADULT_DAYS = 30;
 const byte WORK_SHORTCUT_PRESSES = 5;
 const unsigned int FORCED_SLEEP_MINUTES = 12U * 60U;
+const unsigned int AWAY_HUNGER_MINUTES = 4U * 60U;
+const byte FOOD_EMPTY_SURVIVAL_TICKS = 15;
+const byte WATER_EMPTY_SURVIVAL_TICKS = 9;
+const byte ATTENTION_HAPPY_DELAY_TICKS = 6;
+const byte SICK_HAPPY_COST = 4;
+const byte DIRTY_HAPPY_COST = 3;
+const byte LOW_ENERGY_HAPPY_COST = 3;
+const byte NEGLECT_HAPPY_COST = 4;
+const byte DIRTY_VISIBLE_THRESHOLD = 25;
+const byte DIRTY_HALF_THRESHOLD = 50;
+const byte DIRTY_FULL_THRESHOLD = 100;
+const byte DIRTY_HALF_HAPPY_COST = 10;
+const byte DIRTY_FULL_HAPPY_LIMIT = 20;
+const byte LOW_NEED_VIRUS_THRESHOLD = 25;
+const byte FEED_DIRT_GAIN = 6;
+const byte WATER_DIRT_GAIN = 4;
+const byte CLEAN_POOP_DIRT_GAIN = 12;
+const byte RANDOM_DIRT_GAIN = 10;
+const byte AWAY_HUNGER_FOOD_COST = 18;
+const byte FEED_FOOD_RESTORE = 25;
+const byte FOOD_WATER_THRESHOLD = 33;
+const byte FOOD_RESTORE_WATER_COST = 10;
+const byte PLAY_FOOD_COST = 8;
+const byte PET_FOOD_COST = 4;
+const byte BATH_FOOD_COST = 7;
+const byte CLEAN_WATER_COST = 7;
+const byte MEDICINE_WATER_COST = 10;
+const byte VERY_HUNGRY_FOOD = 15;
+const byte CLEAN_ENERGY_COST = 3;
+const byte LEARN_ENERGY_COST = 3;
+const byte BATH_ENERGY_COST = 4;
 
 #ifdef WOKWI_SIM
 #define GxEPD_BLACK ILI9341_BLACK
@@ -133,7 +164,7 @@ struct Pet {
   byte health;
   byte learning;
   byte poop;
-  bool dirty;
+  byte dirty;
   bool sick;
   bool sleeping;
   unsigned int ageDays;
@@ -149,13 +180,18 @@ struct SaveData {
   byte language;
   byte version;
   unsigned int forcedSleepMinutesLeft;
+  unsigned int awayHungerMinutes;
+  byte waterDepleteRemainder;
+  byte foodEmptyTicks;
+  byte waterEmptyTicks;
+  byte attentionTicks;
 };
 
 Button leftButton = {LEFT_PIN, HIGH, HIGH, 0};
 Button selectButton = {SELECT_PIN, HIGH, HIGH, 0};
 Button rightButton = {RIGHT_PIN, HIGH, HIGH, 0};
 ClockData gameClock = {12, 0, 1, 1, 2026};
-Pet pet = {80, 80, 80, 80, 100, 0, 0, false, false, false, 0};
+Pet pet = {80, 80, 80, 80, 100, 0, 0, 0, false, false, 0};
 
 Screen screen = SET_CLOCK;
 Animal animal = CAT;
@@ -179,6 +215,11 @@ unsigned long lastClockTick = 0;
 unsigned long lastNeedsTick = 0;
 unsigned long lastEggFrame = 0;
 unsigned int forcedSleepMinutesLeft = 0;
+unsigned int awayHungerMinutes = 0;
+byte waterDepleteRemainder = 0;
+byte foodEmptyTicks = 0;
+byte waterEmptyTicks = 0;
+byte attentionTicks = 0;
 bool displayDirty = true;
 bool setupCreatesEgg = true;
 byte languageChoice = 0;
@@ -278,7 +319,8 @@ byte currentSaveStage() {
 void saveGame(byte stage) {
   SaveData data = {
     SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft,
-    languageChoice, SAVE_VERSION, forcedSleepMinutesLeft
+    languageChoice, SAVE_VERSION, forcedSleepMinutesLeft, awayHungerMinutes,
+    waterDepleteRemainder, foodEmptyTicks, waterEmptyTicks, attentionTicks
   };
   EEPROM.put(0, data);
 #if defined(ESP32)
@@ -294,8 +336,10 @@ bool loadGame() {
   }
   gameClock = data.clock;
   pet = data.pet;
+  byte saveVersion = data.version <= SAVE_VERSION ? data.version : 0;
+  if (saveVersion < 8 && pet.dirty > 0) pet.dirty = DIRTY_VISIBLE_THRESHOLD;
   byte savedAnimal = data.animal;
-  if (data.version != SAVE_VERSION) {
+  if (saveVersion < 3) {
     if (savedAnimal == 6) savedAnimal = CAT;
     else if (savedAnimal > 6) savedAnimal--;
   }
@@ -303,8 +347,18 @@ bool loadGame() {
   animal = (Animal)savedAnimal;
   languageChoice = data.language < 3 ? data.language : 0;
   hatchMinutesLeft = data.hatchMinutesLeft;
-  forcedSleepMinutesLeft = (data.version == 2 || data.version == SAVE_VERSION) &&
+  forcedSleepMinutesLeft = saveVersion >= 2 &&
       data.forcedSleepMinutesLeft <= FORCED_SLEEP_MINUTES ? data.forcedSleepMinutesLeft : 0;
+  awayHungerMinutes = saveVersion >= 4 && data.awayHungerMinutes <= AWAY_HUNGER_MINUTES ?
+      data.awayHungerMinutes : 0;
+  waterDepleteRemainder = saveVersion >= 5 && data.waterDepleteRemainder < 12 ?
+      data.waterDepleteRemainder : 0;
+  foodEmptyTicks = saveVersion >= 6 && data.foodEmptyTicks <= FOOD_EMPTY_SURVIVAL_TICKS ?
+      data.foodEmptyTicks : 0;
+  waterEmptyTicks = saveVersion >= 6 && data.waterEmptyTicks <= WATER_EMPTY_SURVIVAL_TICKS ?
+      data.waterEmptyTicks : 0;
+  attentionTicks = saveVersion >= 7 && data.attentionTicks <= ATTENTION_HAPPY_DELAY_TICKS ?
+      data.attentionTicks : 0;
   if (data.stage == EGG) screen = EGG;
   else if (data.stage == GROWN_UP || pet.ageDays >= PET_ADULT_DAYS) screen = GROWN_UP;
   else screen = HOME;
@@ -634,8 +688,15 @@ void drawStatusIcon(byte icon, int x, int y) {
     display.drawLine(x, y + 1, x, y + 11, GxEPD_BLACK);
     display.drawLine(x + 2, y + 1, x + 2, y + 11, GxEPD_BLACK);
   } else if (icon == 1) {
-    display.drawCircle(x + 8, y + 6, 4, GxEPD_BLACK);
-    display.fillTriangle(x + 8, y, x + 5, y + 6, x + 11, y + 6, GxEPD_BLACK);
+    display.drawLine(x + 8, y, x + 4, y + 6, GxEPD_BLACK);
+    display.drawLine(x + 8, y, x + 12, y + 6, GxEPD_BLACK);
+    display.drawLine(x + 4, y + 6, x + 3, y + 9, GxEPD_BLACK);
+    display.drawLine(x + 12, y + 6, x + 13, y + 9, GxEPD_BLACK);
+    display.drawLine(x + 3, y + 9, x + 5, y + 12, GxEPD_BLACK);
+    display.drawLine(x + 13, y + 9, x + 11, y + 12, GxEPD_BLACK);
+    display.drawLine(x + 5, y + 12, x + 8, y + 13, GxEPD_BLACK);
+    display.drawLine(x + 8, y + 13, x + 11, y + 12, GxEPD_BLACK);
+    display.drawPixel(x + 7, y + 6, GxEPD_BLACK);
   } else if (icon == 2) {
     drawHeart(x, y - 1);
   } else {
@@ -1006,7 +1067,7 @@ void drawHome() {
   if (pet.sick) {
     drawVirus(28, 88);
   }
-  if (pet.dirty) {
+  if (petIsDirty()) {
     display.drawLine(151, 80, 160, 72, GxEPD_BLACK);
     display.drawLine(161, 80, 170, 72, GxEPD_BLACK);
     display.drawLine(171, 80, 180, 72, GxEPD_BLACK);
@@ -1290,8 +1351,12 @@ void animateEggHatch() {
 }
 
 void startEgg() {
-  pet = {80, 80, 80, 80, 100, 0, 0, false, false, false, 0};
+  pet = {80, 80, 80, 80, 100, 0, 0, 0, false, false, 0};
   forcedSleepMinutesLeft = 0;
+  resetAwayHungerTimer();
+  waterDepleteRemainder = 0;
+  resetEmptyNeedTimers();
+  resetAttentionTimer();
   hatchMinutesLeft = random(120, 301);
   screen = EGG;
   eggFrame = 0;
@@ -1311,6 +1376,9 @@ void enterGrownUpScreen() {
   if (pet.ageDays < PET_ADULT_DAYS) pet.ageDays = PET_ADULT_DAYS;
   pet.sleeping = false;
   forcedSleepMinutesLeft = 0;
+  resetAwayHungerTimer();
+  resetEmptyNeedTimers();
+  resetAttentionTimer();
   screen = GROWN_UP;
   resetWorkShortcut();
   saveGame(GROWN_UP);
@@ -1324,21 +1392,180 @@ void checkAgeLimit() {
   }
 }
 
+void applyEmptyNeedMood() {
+  if (pet.food == 0 || pet.water == 0) pet.happy = 0;
+}
+
+bool petIsDirty() {
+  return pet.dirty >= DIRTY_VISIBLE_THRESHOLD;
+}
+
+void addDirt(byte amount) {
+  byte before = pet.dirty;
+  pet.dirty = clampStat(pet.dirty + amount);
+  if (before < DIRTY_HALF_THRESHOLD && pet.dirty >= DIRTY_HALF_THRESHOLD) {
+    spendHappiness(DIRTY_HALF_HAPPY_COST);
+  }
+  if (pet.dirty >= DIRTY_FULL_THRESHOLD && pet.happy > DIRTY_FULL_HAPPY_LIMIT) {
+    pet.happy = DIRTY_FULL_HAPPY_LIMIT;
+    applyEmptyNeedMood();
+  }
+}
+
+void gainHappiness(byte amount) {
+  pet.happy = clampStat(pet.happy + amount);
+  applyEmptyNeedMood();
+}
+
+void spendHappiness(byte amount) {
+  pet.happy = clampStat(pet.happy - amount);
+  applyEmptyNeedMood();
+}
+
+void spendFood(byte amount) {
+  pet.food = clampStat(pet.food - amount);
+  applyEmptyNeedMood();
+}
+
+void spendWater(byte amount) {
+  pet.water = clampStat(pet.water - amount);
+  applyEmptyNeedMood();
+}
+
+void spendEnergy(byte amount) {
+  pet.energy = clampStat(pet.energy - amount);
+  if (pet.energy == 0) startForcedSleep();
+}
+
+void restoreFood(byte amount) {
+  byte before = pet.food;
+  byte after = clampStat(pet.food + amount);
+  byte restored = after - before;
+  pet.food = after;
+  if (restored > 0) addDirt(FEED_DIRT_GAIN);
+  if (restored > FOOD_WATER_THRESHOLD ||
+      (before <= FOOD_WATER_THRESHOLD && after > FOOD_WATER_THRESHOLD)) {
+    spendWater(FOOD_RESTORE_WATER_COST);
+  }
+  if (pet.food > 0) foodEmptyTicks = 0;
+  applyEmptyNeedMood();
+}
+
+byte waterDrainPerNeedsTick() {
+  waterDepleteRemainder += 2;
+  if (waterDepleteRemainder >= 12) {
+    waterDepleteRemainder -= 12;
+    return 5;
+  }
+  return 4;
+}
+
+void makeVeryHungry() {
+  if (pet.food > VERY_HUNGRY_FOOD) pet.food = VERY_HUNGRY_FOOD;
+}
+
+void resetAwayHungerTimer() {
+  awayHungerMinutes = 0;
+}
+
+void resetEmptyNeedTimers() {
+  foodEmptyTicks = 0;
+  waterEmptyTicks = 0;
+}
+
+void resetAttentionTimer() {
+  attentionTicks = 0;
+}
+
+byte healthLimitForEmptyNeed(byte emptyTicks, byte survivalTicks) {
+  if (emptyTicks >= survivalTicks) return 0;
+  return ((unsigned int)(survivalTicks - emptyTicks) * 100U) / survivalTicks;
+}
+
+void updateHappinessPressure(bool emptyNeed) {
+  if (emptyNeed) {
+    pet.happy = 0;
+    return;
+  }
+
+  byte penalty = 0;
+  if (pet.sick) penalty += SICK_HAPPY_COST;
+  if (petIsDirty()) penalty += DIRTY_HAPPY_COST;
+  if (pet.energy < 20) penalty += LOW_ENERGY_HAPPY_COST;
+  if (!pet.sleeping) {
+    if (attentionTicks < ATTENTION_HAPPY_DELAY_TICKS) attentionTicks++;
+    if (attentionTicks >= ATTENTION_HAPPY_DELAY_TICKS) penalty += NEGLECT_HAPPY_COST;
+  }
+  if (penalty > 0) spendHappiness(penalty);
+}
+
+byte virusRiskScore() {
+  byte risk = 0;
+  if (pet.poop >= 2) risk++;
+  if (petIsDirty()) risk++;
+  if (pet.food < LOW_NEED_VIRUS_THRESHOLD) risk++;
+  if (pet.water < LOW_NEED_VIRUS_THRESHOLD) risk++;
+  return risk;
+}
+
+void updateEmptyNeedSurvival() {
+  if (pet.food == 0) {
+    if (foodEmptyTicks < FOOD_EMPTY_SURVIVAL_TICKS) foodEmptyTicks++;
+  } else {
+    foodEmptyTicks = 0;
+  }
+
+  if (pet.water == 0) {
+    if (waterEmptyTicks < WATER_EMPTY_SURVIVAL_TICKS) waterEmptyTicks++;
+  } else {
+    waterEmptyTicks = 0;
+  }
+
+  if (pet.food == 0 || pet.water == 0) {
+    pet.happy = 0;
+    byte healthLimit = 100;
+    if (pet.food == 0) {
+      healthLimit = min(healthLimit, healthLimitForEmptyNeed(foodEmptyTicks, FOOD_EMPTY_SURVIVAL_TICKS));
+    }
+    if (pet.water == 0) {
+      healthLimit = min(healthLimit, healthLimitForEmptyNeed(waterEmptyTicks, WATER_EMPTY_SURVIVAL_TICKS));
+    }
+    if (pet.health > healthLimit) pet.health = healthLimit;
+  }
+}
+
 void startForcedSleep() {
   if (screen == EGG || screen == GROWN_UP) return;
   forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
   pet.sleeping = true;
   screen = HOME;
+  resetAwayHungerTimer();
   saveGame(HOME);
   displayDirty = true;
 }
 
+void updateAwayHunger() {
+  if (screen == EGG || screen == GROWN_UP || pet.sleeping) {
+    resetAwayHungerTimer();
+    return;
+  }
+  if (awayHungerMinutes < AWAY_HUNGER_MINUTES) awayHungerMinutes++;
+  if (awayHungerMinutes >= AWAY_HUNGER_MINUTES) {
+    spendFood(AWAY_HUNGER_FOOD_COST);
+    resetAwayHungerTimer();
+    saveGame(HOME);
+    displayDirty = true;
+  }
+}
+
 void advanceClock() {
+  updateAwayHunger();
   if (forcedSleepMinutesLeft > 0) {
     forcedSleepMinutesLeft--;
     pet.sleeping = true;
     if (forcedSleepMinutesLeft == 0) {
       pet.sleeping = false;
+      makeVeryHungry();
       saveGame(HOME);
     }
   }
@@ -1364,19 +1591,22 @@ void updateNeeds() {
   if (screen != HOME && screen != ACTION_SCENE && screen != GAME_MENU && screen != GAME_PLAY) return;
   if (pet.sleeping) {
     pet.energy = clampStat(pet.energy + 8);
-    pet.food = clampStat(pet.food - 2);
-    pet.water = clampStat(pet.water - 2);
+    spendFood(2);
+    spendWater(waterDrainPerNeedsTick());
   } else {
-    pet.food = clampStat(pet.food - 4);
-    pet.water = clampStat(pet.water - 5);
-    pet.happy = clampStat(pet.happy - 3);
-    pet.energy = clampStat(pet.energy - 3);
-    if (pet.energy == 0) startForcedSleep();
+    spendFood(4);
+    spendWater(waterDrainPerNeedsTick());
+    bool emptyNeed = pet.food == 0 || pet.water == 0;
+    pet.happy = emptyNeed ? 0 : clampStat(pet.happy - 3);
+    spendEnergy(emptyNeed ? 6 : 3);
   }
+  updateEmptyNeedSurvival();
   if (random(0, 5) == 0 && pet.poop < 3) pet.poop++;
-  if (random(0, 8) == 0) pet.dirty = true;
-  if ((pet.poop >= 2 || pet.dirty) && random(0, 5) == 0) pet.sick = true;
+  if (random(0, 8) == 0) addDirt(RANDOM_DIRT_GAIN);
+  byte virusRisk = virusRiskScore();
+  if (virusRisk > 0 && random(0, 5) < virusRisk) pet.sick = true;
   if (pet.sick) pet.health = clampStat(pet.health - 5);
+  updateHappinessPressure(pet.food == 0 || pet.water == 0);
   saveGame(HOME);
   displayDirty = true;
 }
@@ -1384,9 +1614,10 @@ void updateNeeds() {
 void rewardMiniGame(bool won) {
   miniGameWon = won;
   miniGamePhase = MINI_GAME_RESULT;
-  pet.happy = clampStat(pet.happy + (won ? 20 : 5));
-  pet.energy = clampStat(pet.energy - 8);
-  if (pet.energy == 0) startForcedSleep();
+  resetAttentionTimer();
+  gainHappiness(won ? 20 : 5);
+  spendFood(PLAY_FOOD_COST);
+  spendEnergy(8);
   if (won) lifeUpTune(); else chirp(300, 160);
   saveGame(HOME);
   displayDirty = true;
@@ -1447,20 +1678,38 @@ void performAction(Action action) {
   sceneAction = action;
   screen = ACTION_SCENE;
   switch (action) {
-    case FEED: pet.food = clampStat(pet.food + 25); break;
-    case WATER: pet.water = clampStat(pet.water + 30); break;
+    case FEED: restoreFood(FEED_FOOD_RESTORE); break;
+    case WATER:
+      {
+        byte before = pet.water;
+        pet.water = clampStat(pet.water + 30);
+        if (pet.water > before) addDirt(WATER_DIRT_GAIN);
+      }
+      if (pet.water > 0) waterEmptyTicks = 0;
+      waterDepleteRemainder = 0;
+      applyEmptyNeedMood();
+      break;
     case SLEEP:
       if (forcedSleepMinutesLeft == 0) pet.sleeping = !pet.sleeping;
       else pet.sleeping = true;
       pet.energy = clampStat(pet.energy + 8);
       break;
-    case OVERNIGHT: pet.sleeping = true; pet.energy = 100; pet.food = clampStat(pet.food - 8); break;
-    case CLEAN: pet.poop = 0; pet.happy = clampStat(pet.happy + 5); break;
-    case MEDICINE: pet.sick = false; pet.health = clampStat(pet.health + 35); break;
-    case LEARN: pet.learning = clampStat(pet.learning + 15); pet.happy = clampStat(pet.happy + 5); break;
-    case PET_ACTION: pet.happy = clampStat(pet.happy + 15); break;
-    case GROOM: pet.dirty = false; pet.happy = clampStat(pet.happy + 10); break;
-    case WASH: pet.dirty = false; pet.health = clampStat(pet.health + 5); break;
+    case OVERNIGHT: pet.sleeping = true; pet.energy = 100; makeVeryHungry(); break;
+    case CLEAN:
+      {
+        bool hadPoop = pet.poop > 0;
+        pet.poop = 0;
+        if (hadPoop) addDirt(CLEAN_POOP_DIRT_GAIN);
+        gainHappiness(5);
+        spendWater(CLEAN_WATER_COST);
+        spendEnergy(CLEAN_ENERGY_COST);
+      }
+      break;
+    case MEDICINE: pet.sick = false; pet.health = clampStat(pet.health + 35); spendWater(MEDICINE_WATER_COST); break;
+    case LEARN: pet.learning = clampStat(pet.learning + 15); gainHappiness(5); spendEnergy(LEARN_ENERGY_COST); break;
+    case PET_ACTION: resetAttentionTimer(); gainHappiness(15); spendFood(PET_FOOD_COST); break;
+    case GROOM: pet.dirty = 0; gainHappiness(10); break;
+    case WASH: pet.dirty = 0; pet.health = clampStat(pet.health + 5); spendFood(BATH_FOOD_COST); spendEnergy(BATH_ENERGY_COST); break;
     default: break;
   }
   saveGame(HOME);
@@ -1510,6 +1759,7 @@ void changeSetupValue(int direction) {
 }
 
 void handleButtons(bool left, bool select, bool right) {
+  if (left || select || right) resetAwayHungerTimer();
   if (screen != HOME && (left || select || right)) resetWorkShortcut();
   if (screen == LANGUAGE) {
     if (left) changeSetupValue(-1);
