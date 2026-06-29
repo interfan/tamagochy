@@ -1,0 +1,2809 @@
+/*
+  nRF52840 + 1.54" e-paper Tamagotchi
+
+  Controls everywhere:
+    D2 = LEFT / previous / decrease
+    D3 = SELECT / confirm
+    D4 = RIGHT / next / increase
+    D5 = MUTE / unmute sounds
+
+  This output sketch is for physical nRF52840 hardware and a real e-paper
+  display. It intentionally does not include the Wokwi ILI9341 preview path.
+*/
+
+#if defined(WOKWI_SIM)
+#error "Use the root Tamagochi.ino for Wokwi. This output sketch is nRF52840/e-paper only."
+#endif
+
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <EEPROM.h>
+#include <U8g2_for_Adafruit_GFX.h>
+#include <GxEPD2_BW.h>
+#if defined(ARDUINO_ARCH_NRF52)
+#include <nrf.h>
+#endif
+#include "companion_bitmaps.h"
+#include "animal_idle_variants.h"
+#include "action_icons.h"
+#include "status_bitmaps.h"
+#include "species_action_bitmaps.h"
+
+#if defined(__AVR__)
+typedef uint_farptr_t FlashAddress;
+#define FLASH_ADDRESS(symbol) pgm_get_far_address(symbol)
+#define READ_FLASH_BYTE(address) pgm_read_byte_far(address)
+#else
+typedef uintptr_t FlashAddress;
+#define FLASH_ADDRESS(symbol) reinterpret_cast<FlashAddress>(symbol)
+#define READ_FLASH_BYTE(address) pgm_read_byte(reinterpret_cast<const uint8_t *>(address))
+#endif
+
+#ifndef LEFT_PIN
+#define LEFT_PIN 2
+#endif
+#ifndef SELECT_PIN
+#define SELECT_PIN 3
+#endif
+#ifndef RIGHT_PIN
+#define RIGHT_PIN 4
+#endif
+#ifndef MUTE_PIN
+#define MUTE_PIN 5
+#endif
+#ifndef BUZZER_PIN
+#define BUZZER_PIN 6
+#endif
+#ifndef EPD_CS_PIN
+#define EPD_CS_PIN 10
+#endif
+#ifndef EPD_DC_PIN
+#define EPD_DC_PIN 9
+#endif
+#ifndef EPD_RST_PIN
+#define EPD_RST_PIN 8
+#endif
+#ifndef EPD_BUSY_PIN
+#define EPD_BUSY_PIN 7
+#endif
+
+const unsigned long DEBOUNCE_MS = 35;
+const unsigned long CLOCK_TICK_MS = 60000UL;
+const unsigned long NEEDS_TICK_MS = 20UL * 60000UL;
+const unsigned long EGG_FRAME_MS = 15UL * 60000UL;
+const unsigned long IDLE_ANIMATION_MS = 6000UL;
+const byte IDLE_ANIMATION_FRAMES = 4;
+const uint32_t SAVE_MAGIC = 0x54414D41UL;
+const uint32_t SAVE_RECORD_MAGIC = 0x53564132UL;
+const byte SAVE_VERSION = 11;
+const byte SAVE_SLOT_COUNT = 2;
+const size_t EEPROM_STORAGE_BYTES = 512;
+const size_t SAVE_SLOT_BYTES = EEPROM_STORAGE_BYTES / SAVE_SLOT_COUNT;
+const unsigned int PET_ADULT_DAYS = 25;
+const byte WORK_SHORTCUT_PRESSES = 5;
+const byte TEST_SHORTCUT_PRESSES = 10;
+const byte DEBUG_SHORTCUT_PRESSES = 5;
+const unsigned int FORCED_SLEEP_MINUTES = 12U * 60U;
+const unsigned int HOSPITAL_MINUTES = 24U * 60U;
+const unsigned int AWAY_HUNGER_MINUTES = 4U * 60U;
+const byte FOOD_EMPTY_SURVIVAL_TICKS = 15;
+const byte WATER_EMPTY_SURVIVAL_TICKS = 9;
+const byte ATTENTION_HAPPY_DELAY_TICKS = 6;
+const byte RECOVERY_BONUS_TICKS = 9;
+const byte SICK_HAPPY_COST = 4;
+const byte DIRTY_HAPPY_COST = 3;
+const byte LOW_ENERGY_HAPPY_COST = 3;
+const byte NEGLECT_HAPPY_COST = 4;
+const byte DIRTY_VISIBLE_THRESHOLD = 25;
+const byte DIRTY_HALF_THRESHOLD = 50;
+const byte DIRTY_FULL_THRESHOLD = 100;
+const byte DIRTY_HALF_HAPPY_COST = 10;
+const byte DIRTY_FULL_HAPPY_LIMIT = 20;
+const byte LOW_NEED_VIRUS_THRESHOLD = 25;
+const byte LOW_STATUS_THRESHOLD = 25;
+const unsigned long LOW_STATUS_FLASH_MS = 700UL;
+const byte STATUS_LOW_FOOD = 1 << 0;
+const byte STATUS_LOW_WATER = 1 << 1;
+const byte STATUS_LOW_HAPPY = 1 << 2;
+const byte STATUS_LOW_ENERGY = 1 << 3;
+const byte WATER_DRAIN_DENOMINATOR = 30;
+const byte WATER_DRAIN_EXTRA_TICKS = 10;
+const byte HOSPITAL_RECOVER_FOOD = 50;
+const byte HOSPITAL_RECOVER_WATER = 50;
+const byte HOSPITAL_RECOVER_HAPPY = 35;
+const byte HOSPITAL_RECOVER_ENERGY = 60;
+const byte HOSPITAL_RECOVER_HEALTH = 60;
+const byte MEDICINE_DIRT_REDUCTION = 15;
+const byte MAX_VIRUS_LEVEL = 3;
+const byte FEED_DIRT_GAIN = 6;
+const byte WATER_DIRT_GAIN = 4;
+const byte CLEAN_POOP_DIRT_GAIN = 12;
+const byte RANDOM_DIRT_GAIN = 10;
+const byte AWAY_HUNGER_FOOD_COST = 18;
+const byte FEED_FOOD_RESTORE = 25;
+const byte FOOD_WATER_THRESHOLD = 33;
+const byte FOOD_RESTORE_WATER_COST = 10;
+const byte PLAY_FOOD_COST = 8;
+const byte PET_FOOD_COST = 4;
+const byte BATH_FOOD_COST = 7;
+const byte CLEAN_WATER_COST = 7;
+const byte MEDICINE_WATER_COST = 10;
+const byte VERY_HUNGRY_FOOD = 20;
+const byte CLEAN_ENERGY_COST = 3;
+const byte LEARN_ENERGY_COST = 3;
+const byte BATH_ENERGY_COST = 4;
+const unsigned long LOVE_MESSAGE_MS = 60UL * 1000UL;
+const unsigned long ACTIVE_WINDOW_MS = 60UL * 1000UL;
+const unsigned long LOW_POWER_WAKE_MS = 60UL * 1000UL;
+const bool IDLE_ANIMATION_AUTO_REFRESH = false;
+
+GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(
+    GxEPD2_154_D67(EPD_CS_PIN, EPD_DC_PIN, EPD_RST_PIN, EPD_BUSY_PIN));
+U8G2_FOR_ADAFRUIT_GFX u8g2Text;
+
+enum Screen : byte {
+  LANGUAGE = 0, SET_CLOCK = 1, SELECT_ANIMAL = 3, EGG = 4, HATCHING = 5,
+  HOME = 6, ACTION_SCENE = 7, GAME_MENU = 8, OPTIONS = 9, GAME_PLAY = 10,
+  GROWN_UP = 11, HOSPITAL = 12, LOVE_MESSAGE = 13, DEBUG_STATS = 14
+};
+enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, PIG, HAMSTER, PENGUIN, ANIMAL_COUNT };
+enum AnimalPose : byte { POSE_IDLE, POSE_HAPPY, POSE_SLEEP };
+enum Action : byte {
+  FEED, WATER, PLAY, SLEEP, OVERNIGHT, CLEAN, MEDICINE,
+  LEARN, PET_ACTION, GROOM, WASH, SETTINGS, ACTION_COUNT
+};
+enum MiniGame : byte { GAME_HIGH_LOW, GAME_COIN_TOSS, GAME_SHELL, MINI_GAME_COUNT };
+enum MiniGamePhase : byte { MINI_GAME_PICK, MINI_GAME_RESULT };
+enum UiText : byte {
+  TXT_SET_HOUR, TXT_SET_MINUTE, TXT_OPTIONS, TXT_CHANGE, TXT_SET_CLOCK, TXT_NEW_EGG,
+  TXT_OPTIONS_HINT, TXT_FOOD, TXT_WATER, TXT_PLAY, TXT_NAP, TXT_OVERNIGHT,
+  TXT_CLEAN, TXT_MEDICINE, TXT_READ, TXT_PET, TXT_GROOM, TXT_BATH,
+  TXT_GAME_HIGH_LOW_MENU, TXT_GAME_HIGH_LOW_TITLE, TXT_GAME_COIN, TXT_GAME_SHELL,
+  TXT_HIGHER, TXT_LOWER, TXT_NEXT, TXT_CORRECT_20, TXT_WRONG_5,
+  TXT_HEADS, TXT_TAILS, TXT_COIN_HEAD_MARK, TXT_COIN_TAIL_MARK,
+  TXT_YOU_GOT_IT, TXT_MISSED, TXT_PLUS_20_HAPPY, TXT_PLUS_5_HAPPY,
+  TXT_FIND_BALL, TXT_MOVE, TXT_FOUND_20, TXT_EMPTY_5,
+  TXT_GROWN_TITLE, TXT_GROWN_DAY, TXT_GROWN_WORK,
+  TXT_HOSPITAL_TITLE, TXT_HOSPITAL_REST, TXT_HOSPITAL_TIMER,
+  TXT_LOVE_MESSAGE
+};
+
+struct Button {
+  byte pin;
+  bool stable;
+  bool last;
+  unsigned long changedAt;
+};
+
+struct ClockData {
+  byte hour;
+  byte minute;
+  byte day;
+  byte month;
+  unsigned int year;
+};
+
+struct Pet {
+  byte food;
+  byte water;
+  byte happy;
+  byte energy;
+  byte health;
+  byte learning;
+  byte poop;
+  byte dirty;
+  bool sick;
+  bool sleeping;
+  unsigned int ageDays;
+};
+
+struct SaveData {
+  uint32_t magic;
+  ClockData clock;
+  Pet pet;
+  byte animal;
+  byte stage;
+  unsigned int hatchMinutesLeft;
+  byte language;
+  byte version;
+  unsigned int forcedSleepMinutesLeft;
+  unsigned int awayHungerMinutes;
+  byte waterDepleteRemainder;
+  byte foodEmptyTicks;
+  byte waterEmptyTicks;
+  byte attentionTicks;
+  byte recoveryBonusTicks;
+  unsigned int hospitalMinutesLeft;
+  byte virusLevel;
+  byte soundMuted;
+};
+
+struct SaveRecord {
+  uint32_t magic;
+  uint32_t sequence;
+  SaveData data;
+  uint32_t crc;
+};
+
+Button leftButton = {LEFT_PIN, HIGH, HIGH, 0};
+Button selectButton = {SELECT_PIN, HIGH, HIGH, 0};
+Button rightButton = {RIGHT_PIN, HIGH, HIGH, 0};
+Button muteButton = {MUTE_PIN, HIGH, HIGH, 0};
+ClockData gameClock = {12, 0, 1, 1, 2026};
+Pet pet = {80, 80, 80, 80, 100, 0, 0, 0, false, false, 0};
+
+Screen screen = SET_CLOCK;
+Animal animal = CAT;
+Action selectedAction = FEED;
+Action sceneAction = FEED;
+byte editField = 0;
+byte animalChoice = 0;
+byte gameChoice = 0;
+MiniGame activeGame = GAME_HIGH_LOW;
+MiniGamePhase miniGamePhase = MINI_GAME_PICK;
+byte gameCurrentNumber = 0;
+byte gameNextNumber = 0;
+byte coinAnswer = 0;
+byte shellPick = 1;
+byte shellAnswer = 0;
+bool miniGameWon = false;
+byte eggFrame = 0;
+byte sceneFrame = 0;
+unsigned int hatchMinutesLeft = 0;
+unsigned long lastClockTick = 0;
+unsigned long lastNeedsTick = 0;
+unsigned long lastEggFrame = 0;
+unsigned long lastIdleAnimation = 0;
+byte idleAnimationFrame = 0;
+unsigned int forcedSleepMinutesLeft = 0;
+unsigned int awayHungerMinutes = 0;
+byte waterDepleteRemainder = 0;
+byte foodEmptyTicks = 0;
+byte waterEmptyTicks = 0;
+byte attentionTicks = 0;
+byte recoveryBonusTicks = 0;
+unsigned int hospitalMinutesLeft = 0;
+byte virusLevel = 0;
+byte lowStatusAlertMask = 0;
+bool lowStatusFlashOn = false;
+unsigned long lastLowStatusFlash = 0;
+bool displayDirty = true;
+bool soundMuted = false;
+bool loveMessageShown = false;
+unsigned long loveMessageStarted = 0;
+bool setupCreatesEgg = true;
+byte languageChoice = 0;
+bool startupShortcutArmed = true;
+unsigned long startupSelectHeldSince = 0;
+byte eggSelectCount = 0;
+unsigned long lastEggSelect = 0;
+byte workShortcutRightCount = 0;
+byte workShortcutLeftCount = 0;
+byte testShortcutRightCount = 0;
+byte testShortcutLeftCount = 0;
+byte debugShortcutLeftCount = 0;
+byte debugShortcutRightCount = 0;
+unsigned long lastUserActivity = 0;
+bool lowPowerCycleSaved = false;
+uint32_t saveSequence = 0;
+byte activeSaveSlot = 1;
+#if defined(ARDUINO_ARCH_NRF52)
+volatile bool nrfRtcWakeFlag = false;
+volatile bool nrfButtonWakeFlag = false;
+unsigned long nrfLastSleepElapsedMs = 0;
+#endif
+
+byte clampStat(int value) {
+  return constrain(value, 0, 100);
+}
+
+bool leapYear(unsigned int year) {
+  return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+byte daysInMonth(byte month, unsigned int year) {
+  const byte days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  return month == 2 && leapYear(year) ? 29 : days[month - 1];
+}
+
+void chirp(unsigned int frequency, unsigned int duration) {
+  (void)frequency;
+  (void)duration;
+}
+
+void playTune(const int *notes, const uint16_t *lengths, byte count) {
+  if (soundMuted) return;
+  for (byte i = 0; i < count; i++) {
+    int note = notes[i];
+    uint16_t length = lengths[i];
+    if (note > 0) {
+      tone(BUZZER_PIN, note, length);
+    }
+    delay(length + 35);
+    noTone(BUZZER_PIN);
+  }
+}
+
+void happyTune() {
+}
+
+void hatchTune() {
+  const int notes[] = {523, 523, 587, 523, 698, 659};
+  const uint16_t lengths[] = {180, 180, 360, 360, 360, 520};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void deepSleepTune() {
+  const int notes[] = {523, 523, 784, 784, 880, 880, 784};
+  const uint16_t lengths[] = {180, 180, 180, 180, 180, 180, 420};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void coinTune() {
+  const int notes[] = {1175, 1568};
+  const uint16_t lengths[] = {70, 120};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void unmuteTune() {
+  const int notes[] = {880, 1175};
+  const uint16_t lengths[] = {80, 120};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void badStatusTune() {
+  const int notes[] = {587, 554, 587, 494};
+  const uint16_t lengths[] = {90, 90, 90, 180};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void hospitalTune() {
+  const int notes[] = {784, 523, 784, 523, 784, 523};
+  const uint16_t lengths[] = {110, 110, 110, 110, 110, 220};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void loveTune() {
+  const int notes[] = {784, 988, 1175, 1568, 1175};
+  const uint16_t lengths[] = {110, 110, 130, 220, 260};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+byte currentLowStatusMask() {
+  byte mask = 0;
+  if (pet.food < LOW_STATUS_THRESHOLD) mask |= STATUS_LOW_FOOD;
+  if (pet.water < LOW_STATUS_THRESHOLD) mask |= STATUS_LOW_WATER;
+  if (pet.happy < LOW_STATUS_THRESHOLD) mask |= STATUS_LOW_HAPPY;
+  if (pet.energy < LOW_STATUS_THRESHOLD) mask |= STATUS_LOW_ENERGY;
+  return mask;
+}
+
+bool updateLowStatusAlerts(bool playSound) {
+  byte mask = currentLowStatusMask();
+  byte newLow = mask & ~lowStatusAlertMask;
+  lowStatusAlertMask = mask;
+  if (playSound && newLow) badStatusTune();
+  return newLow != 0;
+}
+
+bool anyButtonHeld() {
+  return digitalRead(LEFT_PIN) == LOW ||
+         digitalRead(SELECT_PIN) == LOW ||
+         digitalRead(RIGHT_PIN) == LOW ||
+         digitalRead(MUTE_PIN) == LOW;
+}
+
+bool activeWindowOpen(unsigned long now) {
+  return now - lastUserActivity < ACTIVE_WINDOW_MS;
+}
+
+void markUserActivity(unsigned long now) {
+  lastUserActivity = now;
+  lowPowerCycleSaved = false;
+}
+
+bool shouldSaveBeforeLowPower() {
+  return screen == EGG || screen == HOME || screen == GROWN_UP || screen == HOSPITAL;
+}
+
+#if defined(ARDUINO_ARCH_NRF52)
+void nrfButtonWakeIsr() {
+  nrfButtonWakeFlag = true;
+}
+
+void nrfEnsureLfClock() {
+  if ((NRF_CLOCK->LFCLKSTAT & CLOCK_LFCLKSTAT_STATE_Msk) == CLOCK_LFCLKSTAT_STATE_Running) return;
+  NRF_CLOCK->EVENTS_LFCLKSTARTED = 0;
+  NRF_CLOCK->TASKS_LFCLKSTART = 1;
+  for (uint32_t i = 0; i < 1000000UL && NRF_CLOCK->EVENTS_LFCLKSTARTED == 0; i++) {
+    __NOP();
+  }
+}
+
+void nrfStartRtcWake(unsigned long sleepMs) {
+  nrfEnsureLfClock();
+  uint32_t ticks = (uint32_t)(((uint64_t)sleepMs * 32768ULL) / 1000ULL);
+  if (ticks < 2) ticks = 2;
+  if (ticks > 0x00FFFFFFUL) ticks = 0x00FFFFFFUL;
+
+  NRF_RTC2->TASKS_STOP = 1;
+  NRF_RTC2->TASKS_CLEAR = 1;
+  NRF_RTC2->PRESCALER = 0;
+  NRF_RTC2->CC[0] = ticks;
+  NRF_RTC2->EVENTS_COMPARE[0] = 0;
+  NRF_RTC2->INTENCLR = 0xFFFFFFFFUL;
+  NRF_RTC2->EVTENCLR = 0xFFFFFFFFUL;
+  NRF_RTC2->INTENSET = RTC_INTENSET_COMPARE0_Msk;
+  NRF_RTC2->EVTENSET = RTC_EVTENSET_COMPARE0_Msk;
+  NVIC_ClearPendingIRQ(RTC2_IRQn);
+  NVIC_SetPriority(RTC2_IRQn, 7);
+  NVIC_EnableIRQ(RTC2_IRQn);
+  nrfRtcWakeFlag = false;
+  NRF_RTC2->TASKS_START = 1;
+}
+
+void nrfStopRtcWake() {
+  NRF_RTC2->TASKS_STOP = 1;
+  NRF_RTC2->INTENCLR = 0xFFFFFFFFUL;
+  NRF_RTC2->EVTENCLR = 0xFFFFFFFFUL;
+  NRF_RTC2->EVENTS_COMPARE[0] = 0;
+  NVIC_DisableIRQ(RTC2_IRQn);
+}
+
+unsigned long nrfRtcElapsedMs() {
+  return (unsigned long)(((uint64_t)NRF_RTC2->COUNTER * 1000ULL) / 32768ULL);
+}
+
+void platformHardwareInit() {
+  attachInterrupt(digitalPinToInterrupt(LEFT_PIN), nrfButtonWakeIsr, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SELECT_PIN), nrfButtonWakeIsr, FALLING);
+  attachInterrupt(digitalPinToInterrupt(RIGHT_PIN), nrfButtonWakeIsr, FALLING);
+  attachInterrupt(digitalPinToInterrupt(MUTE_PIN), nrfButtonWakeIsr, FALLING);
+}
+
+extern "C" void RTC2_IRQHandler(void) {
+  if (NRF_RTC2->EVENTS_COMPARE[0]) {
+    NRF_RTC2->EVENTS_COMPARE[0] = 0;
+    nrfRtcWakeFlag = true;
+  }
+}
+#else
+void platformHardwareInit() {}
+#endif
+
+void platformLowPowerSleep() {
+#if defined(ARDUINO_ARCH_NRF52)
+  nrfLastSleepElapsedMs = 0;
+  if (anyButtonHeld()) return;
+
+  nrfButtonWakeFlag = false;
+  nrfStartRtcWake(LOW_POWER_WAKE_MS);
+  while (!nrfRtcWakeFlag && !nrfButtonWakeFlag && !anyButtonHeld()) {
+    __SEV();
+    __WFE();
+    __WFE();
+  }
+  nrfLastSleepElapsedMs = nrfRtcElapsedMs();
+  nrfStopRtcWake();
+#endif
+}
+
+void applyLowPowerElapsed(unsigned long beforeSleep, unsigned long wokeAt) {
+#if defined(ARDUINO_ARCH_NRF52)
+  unsigned long observedMs = wokeAt - beforeSleep;
+  if (nrfLastSleepElapsedMs <= observedMs + 1000UL) return;
+  unsigned long missingMs = nrfLastSleepElapsedMs - observedMs;
+  lastClockTick -= missingMs;
+  lastNeedsTick -= missingMs;
+  lastEggFrame -= missingMs;
+  lastIdleAnimation -= missingMs;
+#endif
+}
+
+void enterLowPowerCycle(unsigned long now) {
+  if (activeWindowOpen(now) || displayDirty || screen == ACTION_SCENE || screen == HATCHING) return;
+
+  if (!lowPowerCycleSaved && shouldSaveBeforeLowPower()) {
+    saveGame(currentSaveStage());
+    lowPowerCycleSaved = true;
+  }
+
+  display.hibernate();
+  unsigned long beforeSleep = millis();
+  platformLowPowerSleep();
+  unsigned long wokeAt = millis();
+  applyLowPowerElapsed(beforeSleep, wokeAt);
+  lastLowStatusFlash = wokeAt;
+  if (anyButtonHeld()) markUserActivity(wokeAt);
+}
+
+void updateLowStatusFlash(unsigned long now) {
+  if (!activeWindowOpen(now)) {
+    if (lowStatusFlashOn) {
+      lowStatusFlashOn = false;
+      if (screen == HOME) displayDirty = true;
+    }
+    lastLowStatusFlash = now;
+    return;
+  }
+
+  if (screen != HOME || currentLowStatusMask() == 0) {
+    if (lowStatusFlashOn) {
+      lowStatusFlashOn = false;
+      if (screen == HOME) displayDirty = true;
+    }
+    lastLowStatusFlash = now;
+    return;
+  }
+
+  if (now - lastLowStatusFlash >= LOW_STATUS_FLASH_MS) {
+    lastLowStatusFlash = now;
+    lowStatusFlashOn = !lowStatusFlashOn;
+    displayDirty = true;
+  }
+}
+
+void lifeUpTune() {
+  const int notes[] = {659, 784, 988, 1319, 1568, 1760};
+  const uint16_t lengths[] = {90, 90, 90, 110, 110, 180};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void grownUpTune() {
+  const int notes[] = {659, 659, 698, 784, 784, 698, 659, 587, 523, 523, 587, 659, 659, 587, 587};
+  const uint16_t lengths[] = {150, 150, 150, 150, 150, 150, 150, 150, 150, 150, 150, 150, 220, 120, 360};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+bool pressed(Button &button) {
+  bool reading = digitalRead(button.pin);
+  if (reading != button.last) {
+    button.last = reading;
+    button.changedAt = millis();
+  }
+  if (millis() - button.changedAt > DEBOUNCE_MS && reading != button.stable) {
+    button.stable = reading;
+    return reading == LOW;
+  }
+  return false;
+}
+
+bool savedStageValid(byte stage) {
+  return stage == EGG || stage == HOME || stage == GROWN_UP || stage == HOSPITAL;
+}
+
+byte currentSaveStage() {
+  if (screen == EGG) return EGG;
+  if (screen == GROWN_UP) return GROWN_UP;
+  if (screen == HOSPITAL) return HOSPITAL;
+  return HOME;
+}
+
+uint32_t crc32Bytes(const uint8_t *data, size_t length) {
+  uint32_t crc = 0xFFFFFFFFUL;
+  while (length--) {
+    crc ^= *data++;
+    for (byte i = 0; i < 8; i++) {
+      if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320UL;
+      else crc >>= 1;
+    }
+  }
+  return ~crc;
+}
+
+uint32_t saveRecordCrc(const SaveRecord &record) {
+  return crc32Bytes(reinterpret_cast<const uint8_t *>(&record),
+                    sizeof(SaveRecord) - sizeof(record.crc));
+}
+
+int saveSlotAddress(byte slot) {
+  return slot * SAVE_SLOT_BYTES;
+}
+
+bool saveDataHeaderValid(const SaveData &data) {
+  return data.magic == SAVE_MAGIC && savedStageValid(data.stage);
+}
+
+bool saveRecordValid(const SaveRecord &record) {
+  return record.magic == SAVE_RECORD_MAGIC &&
+         saveDataHeaderValid(record.data) &&
+         record.data.version <= SAVE_VERSION &&
+         saveRecordCrc(record) == record.crc;
+}
+
+bool loadBestSaveData(SaveData &data, bool &legacySave) {
+  SaveRecord slot0;
+  SaveRecord slot1;
+  EEPROM.get(saveSlotAddress(0), slot0);
+  EEPROM.get(saveSlotAddress(1), slot1);
+  bool slot0Valid = saveRecordValid(slot0);
+  bool slot1Valid = saveRecordValid(slot1);
+  legacySave = false;
+
+  if (slot0Valid || slot1Valid) {
+    if (slot1Valid && (!slot0Valid || slot1.sequence > slot0.sequence)) {
+      data = slot1.data;
+      saveSequence = slot1.sequence;
+      activeSaveSlot = 1;
+    } else {
+      data = slot0.data;
+      saveSequence = slot0.sequence;
+      activeSaveSlot = 0;
+    }
+    return true;
+  }
+
+  EEPROM.get(0, data);
+  if (!saveDataHeaderValid(data)) return false;
+  legacySave = true;
+  saveSequence = 0;
+  activeSaveSlot = 1;
+  return true;
+}
+
+bool writeSaveData(const SaveData &data) {
+  if (sizeof(SaveRecord) > SAVE_SLOT_BYTES) return false;
+
+  SaveRecord record;
+  memset(&record, 0, sizeof(record));
+  record.magic = SAVE_RECORD_MAGIC;
+  record.sequence = saveSequence + 1;
+  record.data = data;
+  record.crc = saveRecordCrc(record);
+
+  byte targetSlot = activeSaveSlot == 0 ? 1 : 0;
+  EEPROM.put(saveSlotAddress(targetSlot), record);
+#if defined(ESP32) || defined(ARDUINO_ARCH_NRF52)
+  EEPROM.commit();
+#endif
+
+  SaveRecord verify;
+  EEPROM.get(saveSlotAddress(targetSlot), verify);
+  if (!saveRecordValid(verify)) return false;
+
+  saveSequence = verify.sequence;
+  activeSaveSlot = targetSlot;
+  return true;
+}
+
+bool applyLoadedSaveData(const SaveData &data) {
+  gameClock = data.clock;
+  pet = data.pet;
+  byte saveVersion = data.version <= SAVE_VERSION ? data.version : 0;
+  if (saveVersion < 8 && pet.dirty > 0) pet.dirty = DIRTY_VISIBLE_THRESHOLD;
+
+  byte savedAnimal = data.animal;
+  if (saveVersion < 3) {
+    if (savedAnimal == 6) savedAnimal = CAT;
+    else if (savedAnimal > 6) savedAnimal--;
+  }
+  if (savedAnimal >= ANIMAL_COUNT) return false;
+  animal = (Animal)savedAnimal;
+
+  languageChoice = data.language < 3 ? data.language : 0;
+  hatchMinutesLeft = data.hatchMinutesLeft;
+  forcedSleepMinutesLeft = saveVersion >= 2 &&
+      data.forcedSleepMinutesLeft <= FORCED_SLEEP_MINUTES ? data.forcedSleepMinutesLeft : 0;
+  awayHungerMinutes = saveVersion >= 4 && data.awayHungerMinutes <= AWAY_HUNGER_MINUTES ?
+      data.awayHungerMinutes : 0;
+  waterDepleteRemainder = saveVersion >= 5 && data.waterDepleteRemainder < WATER_DRAIN_DENOMINATOR ?
+      data.waterDepleteRemainder : 0;
+  foodEmptyTicks = saveVersion >= 6 && data.foodEmptyTicks <= FOOD_EMPTY_SURVIVAL_TICKS ?
+      data.foodEmptyTicks : 0;
+  waterEmptyTicks = saveVersion >= 6 && data.waterEmptyTicks <= WATER_EMPTY_SURVIVAL_TICKS ?
+      data.waterEmptyTicks : 0;
+  attentionTicks = saveVersion >= 7 && data.attentionTicks <= ATTENTION_HAPPY_DELAY_TICKS ?
+      data.attentionTicks : 0;
+  recoveryBonusTicks = saveVersion >= 9 && data.recoveryBonusTicks <= RECOVERY_BONUS_TICKS ?
+      data.recoveryBonusTicks : 0;
+  hospitalMinutesLeft = saveVersion >= 9 && data.hospitalMinutesLeft <= HOSPITAL_MINUTES ?
+      data.hospitalMinutesLeft : 0;
+  virusLevel = saveVersion >= 10 && data.virusLevel <= MAX_VIRUS_LEVEL ?
+      data.virusLevel : pet.sick ? 1 : 0;
+  soundMuted = saveVersion >= 11 ? data.soundMuted != 0 : false;
+
+  if (!pet.sick) virusLevel = 0;
+  else if (virusLevel == 0) virusLevel = 1;
+
+  if (data.stage == EGG) screen = EGG;
+  else if (data.stage == HOSPITAL) {
+    screen = HOSPITAL;
+    if (hospitalMinutesLeft == 0) hospitalMinutesLeft = HOSPITAL_MINUTES;
+  }
+  else if (data.stage == GROWN_UP || pet.ageDays >= PET_ADULT_DAYS) screen = GROWN_UP;
+  else screen = HOME;
+
+  if (screen == EGG || screen == GROWN_UP || screen == HOSPITAL) forcedSleepMinutesLeft = 0;
+  else if (forcedSleepMinutesLeft > 0 || pet.energy == 0) {
+    if (forcedSleepMinutesLeft == 0) forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
+    pet.sleeping = true;
+  }
+
+  return true;
+}
+
+void saveSoundSetting() {
+  SaveData data;
+  bool legacySave = false;
+  if (!loadBestSaveData(data, legacySave)) return;
+  data.version = SAVE_VERSION;
+  data.soundMuted = soundMuted ? 1 : 0;
+  writeSaveData(data);
+}
+
+void toggleSoundMute() {
+  soundMuted = !soundMuted;
+  noTone(BUZZER_PIN);
+  saveSoundSetting();
+  if (!soundMuted) unmuteTune();
+}
+
+void saveGame(byte stage) {
+  SaveData data = {
+    SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft,
+    languageChoice, SAVE_VERSION, forcedSleepMinutesLeft, awayHungerMinutes,
+    waterDepleteRemainder, foodEmptyTicks, waterEmptyTicks, attentionTicks,
+    recoveryBonusTicks, hospitalMinutesLeft, virusLevel, soundMuted ? 1 : 0
+  };
+  writeSaveData(data);
+}
+
+bool loadGame() {
+  SaveData data;
+  bool legacySave = false;
+  if (!loadBestSaveData(data, legacySave)) {
+    return false;
+  }
+  if (!applyLoadedSaveData(data)) return false;
+  if (legacySave) saveGame(currentSaveStage());
+  return true;
+}
+
+const __FlashStringHelper *animalName(Animal kind) {
+  switch (kind) {
+    case CAT: return F("MICA");
+    case DOG: return F("PIP");
+    case BUNNY: return F("LUMA");
+    case PANDA: return F("PO");
+    case DRAGON: return F("EMBER");
+    case FOX: return F("FEN");
+    case PIG: return F("TRUFFLE");
+    case HAMSTER: return F("NIBBLE");
+    case PENGUIN: return F("PIPER");
+    default: return F("FRIEND");
+  }
+}
+
+const __FlashStringHelper *uiText(UiText text) {
+  if (languageChoice == 1) {
+    return F("");
+  } else if (languageChoice == 2) {
+    switch (text) {
+      case TXT_SET_HOUR: return F("STUNDE");
+      case TXT_SET_MINUTE: return F("MINUTE");
+      case TXT_OPTIONS: return F("OPTION");
+      case TXT_CHANGE: return F("AENDERN");
+      case TXT_SET_CLOCK: return F("UHR STELLEN");
+      case TXT_NEW_EGG: return F("NEUES EI");
+      case TXT_OPTIONS_HINT: return F("< > WAHL   OK");
+      case TXT_FOOD: return F("FUTTER");
+      case TXT_WATER: return F("WASSER");
+      case TXT_PLAY: return F("SPIEL");
+      case TXT_NAP: return F("SCHLAF");
+      case TXT_OVERNIGHT: return F("NACHT");
+      case TXT_CLEAN: return F("SAUBER");
+      case TXT_MEDICINE: return F("MEDIZIN");
+      case TXT_READ: return F("LESEN");
+      case TXT_PET: return F("STREICH");
+      case TXT_GROOM: return F("KAMM");
+      case TXT_BATH: return F("BAD");
+      case TXT_GAME_HIGH_LOW_MENU: return F("HOCH / TIEF");
+      case TXT_GAME_HIGH_LOW_TITLE: return F("HOCH TIEF");
+      case TXT_GAME_COIN: return F("MUENZWURF");
+      case TXT_GAME_SHELL: return F("BECHER");
+      case TXT_HIGHER: return F("HOCH");
+      case TXT_LOWER: return F("TIEF");
+      case TXT_NEXT: return F("NAECH");
+      case TXT_CORRECT_20: return F("RICHTIG +20");
+      case TXT_WRONG_5: return F("FALSCH +5");
+      case TXT_HEADS: return F("KOPF");
+      case TXT_TAILS: return F("ZAHL");
+      case TXT_COIN_HEAD_MARK: return F("K");
+      case TXT_COIN_TAIL_MARK: return F("Z");
+      case TXT_YOU_GOT_IT: return F("RICHTIG");
+      case TXT_MISSED: return F("DANEBEN");
+      case TXT_PLUS_20_HAPPY: return F("+20 GLUECK");
+      case TXT_PLUS_5_HAPPY: return F("+5 GLUECK");
+      case TXT_FIND_BALL: return F("FINDE BALL");
+      case TXT_MOVE: return F("WECHSEL");
+      case TXT_FOUND_20: return F("GEFUNDEN +20");
+      case TXT_EMPTY_5: return F("LEER +5");
+      case TXT_GROWN_TITLE: return F("GROSS!");
+      case TXT_GROWN_DAY: return F("TAG 25");
+      case TXT_GROWN_WORK: return F("ZUR ARBEIT");
+      case TXT_HOSPITAL_TITLE: return F("KLINIK");
+      case TXT_HOSPITAL_REST: return F("RUHE");
+      case TXT_HOSPITAL_TIMER: return F("ZEIT");
+      case TXT_LOVE_MESSAGE: return F("ICH LIEBE DICH");
+    }
+  }
+
+  switch (text) {
+    case TXT_SET_HOUR: return F("SET HOUR");
+    case TXT_SET_MINUTE: return F("SET MINUTE");
+    case TXT_OPTIONS: return F("OPTIONS");
+    case TXT_CHANGE: return F("CHANGE");
+    case TXT_SET_CLOCK: return F("SET CLOCK");
+    case TXT_NEW_EGG: return F("NEW EGG");
+    case TXT_OPTIONS_HINT: return F("< > MOVE   OK");
+    case TXT_FOOD: return F("FOOD");
+    case TXT_WATER: return F("WATER");
+    case TXT_PLAY: return F("PLAY");
+    case TXT_NAP: return F("NAP");
+    case TXT_OVERNIGHT: return F("NIGHT");
+    case TXT_CLEAN: return F("CLEAN");
+    case TXT_MEDICINE: return F("MEDS");
+    case TXT_READ: return F("READ");
+    case TXT_PET: return F("PET");
+    case TXT_GROOM: return F("GROOM");
+    case TXT_BATH: return F("BATH");
+    case TXT_GAME_HIGH_LOW_MENU: return F("HIGHER / LOWER");
+    case TXT_GAME_HIGH_LOW_TITLE: return F("HIGH LOW");
+    case TXT_GAME_COIN: return F("COIN TOSS");
+    case TXT_GAME_SHELL: return F("SHELL GAME");
+    case TXT_HIGHER: return F("HIGHER");
+    case TXT_LOWER: return F("LOWER");
+    case TXT_NEXT: return F("NEXT");
+    case TXT_CORRECT_20: return F("CORRECT +20");
+    case TXT_WRONG_5: return F("WRONG +5");
+    case TXT_HEADS: return F("HEADS");
+    case TXT_TAILS: return F("TAILS");
+    case TXT_COIN_HEAD_MARK: return F("H");
+    case TXT_COIN_TAIL_MARK: return F("T");
+    case TXT_YOU_GOT_IT: return F("YOU GOT IT");
+    case TXT_MISSED: return F("MISSED");
+    case TXT_PLUS_20_HAPPY: return F("+20 HAPPY");
+    case TXT_PLUS_5_HAPPY: return F("+5 HAPPY");
+    case TXT_FIND_BALL: return F("FIND THE BALL");
+    case TXT_MOVE: return F("MOVE");
+    case TXT_FOUND_20: return F("FOUND +20");
+    case TXT_EMPTY_5: return F("EMPTY +5");
+    case TXT_GROWN_TITLE: return F("GROWN UP!");
+    case TXT_GROWN_DAY: return F("DAY 25");
+    case TXT_GROWN_WORK: return F("OFF TO WORK");
+    case TXT_HOSPITAL_TITLE: return F("HOSPITAL");
+    case TXT_HOSPITAL_REST: return F("RESTING");
+    case TXT_HOSPITAL_TIMER: return F("TIME LEFT");
+    case TXT_LOVE_MESSAGE: return F("I LOVE YOU");
+  }
+  return F("");
+}
+
+const char *bgText(UiText text) {
+  switch (text) {
+    case TXT_SET_HOUR: return "ЧАС";
+    case TXT_SET_MINUTE: return "МИНУТА";
+    case TXT_OPTIONS: return "ОПЦИИ";
+    case TXT_CHANGE: return "ПРОМЕНИ";
+    case TXT_SET_CLOCK: return "ЧАСОВНИК";
+    case TXT_NEW_EGG: return "НОВО ЯЙЦЕ";
+    case TXT_OPTIONS_HINT: return "< > МЕСТИ   OK";
+    case TXT_FOOD: return "ХРАНА";
+    case TXT_WATER: return "ВОДА";
+    case TXT_PLAY: return "ИГРА";
+    case TXT_NAP: return "СЪН";
+    case TXT_OVERNIGHT: return "НОЩ";
+    case TXT_CLEAN: return "ЧИСТИ";
+    case TXT_MEDICINE: return "ЛЕК";
+    case TXT_READ: return "ЧЕТИ";
+    case TXT_PET: return "ГАЛИ";
+    case TXT_GROOM: return "РЕШИ";
+    case TXT_BATH: return "БАНЯ";
+    case TXT_GAME_HIGH_LOW_MENU: return "ГОЛЯМО / МАЛКО";
+    case TXT_GAME_HIGH_LOW_TITLE: return "ГОЛЯМО МАЛКО";
+    case TXT_GAME_COIN: return "МОНЕТА";
+    case TXT_GAME_SHELL: return "ЧАШКИ";
+    case TXT_HIGHER: return "ГОЛЯМО";
+    case TXT_LOWER: return "МАЛКО";
+    case TXT_NEXT: return "СЛЕД";
+    case TXT_CORRECT_20: return "ВЯРНО +20";
+    case TXT_WRONG_5: return "ГРЕШНО +5";
+    case TXT_HEADS: return "ЕЗИ";
+    case TXT_TAILS: return "ТУРА";
+    case TXT_COIN_HEAD_MARK: return "Е";
+    case TXT_COIN_TAIL_MARK: return "Т";
+    case TXT_YOU_GOT_IT: return "ПОЗНА";
+    case TXT_MISSED: return "НЕ";
+    case TXT_PLUS_20_HAPPY: return "+20 РАДОСТ";
+    case TXT_PLUS_5_HAPPY: return "+5 РАДОСТ";
+    case TXT_FIND_BALL: return "НАМЕРИ ТОПКА";
+    case TXT_MOVE: return "МЕСТИ";
+    case TXT_FOUND_20: return "НАМЕРИ +20";
+    case TXT_EMPTY_5: return "ПРАЗНО +5";
+    case TXT_GROWN_TITLE: return "ПОРАСНА!";
+    case TXT_GROWN_DAY: return "ДЕН 25";
+    case TXT_GROWN_WORK: return "НА РАБОТА";
+    case TXT_HOSPITAL_TITLE: return "БОЛНИЦА";
+    case TXT_HOSPITAL_REST: return "ПОЧИВКА";
+    case TXT_HOSPITAL_TIMER: return "ОСТАВА";
+    case TXT_LOVE_MESSAGE: return "ОБИЧАМ ТЕ";
+  }
+  return "";
+}
+
+UiText actionLabel(Action action) {
+  switch (action) {
+    case FEED: return TXT_FOOD;
+    case WATER: return TXT_WATER;
+    case PLAY: return TXT_PLAY;
+    case SLEEP: return TXT_NAP;
+    case OVERNIGHT: return TXT_OVERNIGHT;
+    case CLEAN: return TXT_CLEAN;
+    case MEDICINE: return TXT_MEDICINE;
+    case LEARN: return TXT_READ;
+    case PET_ACTION: return TXT_PET;
+    case GROOM: return TXT_GROOM;
+    case WASH: return TXT_BATH;
+    case SETTINGS: return TXT_OPTIONS;
+    default: return TXT_OPTIONS;
+  }
+}
+
+void drawCentered(const __FlashStringHelper *text, int y, byte size = 1) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.setTextSize(size);
+  display.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
+  display.setCursor((200 - w) / 2, y);
+  display.print(text);
+}
+
+void drawCenteredInBox(const __FlashStringHelper *text, int x, int y, int w, int h, byte size = 1) {
+  int16_t x1, y1;
+  uint16_t tw, th;
+  display.setTextSize(size);
+  display.getTextBounds(text, 0, 0, &x1, &y1, &tw, &th);
+  display.setCursor(x + (w - tw) / 2 - x1, y + (h - th) / 2 - y1);
+  display.print(text);
+}
+
+bool useCyrillicText() {
+  return languageChoice == 1;
+}
+
+void setCyrillicFont(byte size, uint16_t color) {
+  u8g2Text.setFont(size >= 2 ? u8g2_font_9x15_t_cyrillic : u8g2_font_6x12_t_cyrillic);
+  u8g2Text.setFontMode(1);
+  u8g2Text.setFontDirection(0);
+  u8g2Text.setForegroundColor(color);
+}
+
+int uiTextWidth(UiText text, byte size = 1) {
+  if (useCyrillicText()) {
+    setCyrillicFont(size, GxEPD_BLACK);
+    return u8g2Text.getUTF8Width(bgText(text));
+  }
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.setTextSize(size);
+  display.getTextBounds(uiText(text), 0, 0, &x1, &y1, &w, &h);
+  return w;
+}
+
+int uiTextHeight(byte size = 1) {
+  if (useCyrillicText()) {
+    setCyrillicFont(size, GxEPD_BLACK);
+    return u8g2Text.getFontAscent() - u8g2Text.getFontDescent();
+  }
+  return 8 * size;
+}
+
+void drawUiText(UiText text, int x, int y, byte size = 1, uint16_t color = GxEPD_BLACK) {
+  if (useCyrillicText()) {
+    setCyrillicFont(size, color);
+    u8g2Text.drawUTF8(x, y + u8g2Text.getFontAscent(), bgText(text));
+  } else {
+    display.setTextColor(color);
+    display.setTextSize(size);
+    display.setCursor(x, y);
+    display.print(uiText(text));
+  }
+}
+
+void drawUiCentered(UiText text, int y, byte size = 1, uint16_t color = GxEPD_BLACK) {
+  drawUiText(text, (200 - uiTextWidth(text, size)) / 2, y, size, color);
+}
+
+void drawUiCenteredInBox(UiText text, int x, int y, int w, int h, byte size = 1,
+                         uint16_t color = GxEPD_BLACK) {
+  int tw = uiTextWidth(text, size);
+  int th = uiTextHeight(size);
+  drawUiText(text, x + (w - tw) / 2, y + (h - th) / 2, size, color);
+}
+
+void drawScaledBitmap(int x, int y, FlashAddress bitmap, int width, int height, int scalePercent) {
+  int bytesPerRow = (width + 7) / 8;
+  for (int sourceY = 0; sourceY < height; sourceY++) {
+    int outputY = y + sourceY * scalePercent / 100;
+    int outputBottom = y + (sourceY + 1) * scalePercent / 100;
+    int runStart = -1;
+    for (int sourceX = 0; sourceX <= width; sourceX++) {
+      bool black = false;
+      if (sourceX < width) {
+        uint8_t value = READ_FLASH_BYTE(bitmap + sourceY * bytesPerRow + sourceX / 8);
+        black = value & (0x80 >> (sourceX % 8));
+      }
+      if (black && runStart < 0) runStart = sourceX;
+      if (!black && runStart >= 0) {
+        int outputX = x + runStart * scalePercent / 100;
+        int outputRight = x + sourceX * scalePercent / 100;
+        display.fillRect(outputX, outputY, outputRight - outputX, outputBottom - outputY, GxEPD_BLACK);
+        runStart = -1;
+      }
+    }
+  }
+}
+
+void drawClock() {
+  display.fillRoundRect(3, 2, 194, 18, 8, GxEPD_BLACK);
+  display.setTextColor(GxEPD_WHITE);
+  display.setTextSize(1);
+  display.setCursor(8, 7);
+  if (gameClock.hour < 10) display.print('0');
+  display.print(gameClock.hour);
+  display.print(':');
+  if (gameClock.minute < 10) display.print('0');
+  display.print(gameClock.minute);
+  display.setCursor(122, 7);
+  if (gameClock.day < 10) display.print('0');
+  display.print(gameClock.day);
+  display.print('.');
+  if (gameClock.month < 10) display.print('0');
+  display.print(gameClock.month);
+  display.print('.');
+  display.print(gameClock.year);
+  const __FlashStringHelper *name = animalName(animal);
+  int16_t x1, y1;
+  uint16_t nameWidth, nameHeight;
+  display.getTextBounds(name, 0, 7, &x1, &y1, &nameWidth, &nameHeight);
+  display.setCursor(100 - nameWidth / 2, 7);
+  display.print(name);
+  display.setTextColor(GxEPD_BLACK);
+}
+
+void drawHeart(int x, int y, bool filled = true) {
+  if (filled) {
+    display.fillCircle(x + 3, y + 3, 3, GxEPD_BLACK);
+    display.fillCircle(x + 9, y + 3, 3, GxEPD_BLACK);
+    display.fillTriangle(x, y + 4, x + 12, y + 4, x + 6, y + 12, GxEPD_BLACK);
+  } else {
+    display.drawCircle(x + 3, y + 3, 3, GxEPD_BLACK);
+    display.drawCircle(x + 9, y + 3, 3, GxEPD_BLACK);
+  }
+}
+
+void drawStatusIcon(byte icon, int x, int y) {
+  if (icon == 0) {
+    display.drawCircle(x + 8, y + 6, 5, GxEPD_BLACK);
+    display.drawCircle(x + 8, y + 6, 2, GxEPD_BLACK);
+    display.drawLine(x, y + 1, x, y + 11, GxEPD_BLACK);
+    display.drawLine(x + 2, y + 1, x + 2, y + 11, GxEPD_BLACK);
+  } else if (icon == 1) {
+    display.drawLine(x + 8, y, x + 4, y + 6, GxEPD_BLACK);
+    display.drawLine(x + 8, y, x + 12, y + 6, GxEPD_BLACK);
+    display.drawLine(x + 4, y + 6, x + 3, y + 9, GxEPD_BLACK);
+    display.drawLine(x + 12, y + 6, x + 13, y + 9, GxEPD_BLACK);
+    display.drawLine(x + 3, y + 9, x + 5, y + 12, GxEPD_BLACK);
+    display.drawLine(x + 13, y + 9, x + 11, y + 12, GxEPD_BLACK);
+    display.drawLine(x + 5, y + 12, x + 8, y + 13, GxEPD_BLACK);
+    display.drawLine(x + 8, y + 13, x + 11, y + 12, GxEPD_BLACK);
+    display.drawPixel(x + 7, y + 6, GxEPD_BLACK);
+  } else if (icon == 2) {
+    drawHeart(x, y - 1);
+  } else {
+    display.fillTriangle(x + 8, y, x + 3, y + 7, x + 8, y + 7, GxEPD_BLACK);
+    display.fillTriangle(x + 7, y + 5, x + 12, y + 5, x + 5, y + 12, GxEPD_BLACK);
+  }
+}
+
+void drawMeter(int x, int y, int w, byte icon, int value) {
+  drawStatusIcon(icon, x, y - 2);
+  int fillWidth = map(constrain(value, 0, 100), 0, 100, 0, w - 22);
+  bool flash = value < LOW_STATUS_THRESHOLD && lowStatusFlashOn;
+  if (flash) {
+    display.fillRoundRect(x + 18, y - 1, w - 18, 7, 3, GxEPD_BLACK);
+    if (fillWidth > 0) display.fillRoundRect(x + 20, y + 1, fillWidth, 3, 1, GxEPD_WHITE);
+  } else {
+    display.drawRoundRect(x + 18, y - 1, w - 18, 7, 3, GxEPD_BLACK);
+    if (fillWidth > 0) display.fillRoundRect(x + 20, y + 1, fillWidth, 3, 1, GxEPD_BLACK);
+  }
+}
+
+void drawBookCorner(int x, int y, int sx, int sy) {
+  display.drawLine(x, y, x + sx * 20, y, GxEPD_BLACK);
+  display.drawLine(x, y, x, y + sy * 20, GxEPD_BLACK);
+  display.drawCircle(x + sx * 12, y + sy * 12, 8, GxEPD_BLACK);
+  display.drawCircle(x + sx * 12, y + sy * 12, 4, GxEPD_BLACK);
+  display.fillCircle(x + sx * 12, y + sy * 12, 1, GxEPD_BLACK);
+  display.fillEllipse(x + sx * 23, y + sy * 5, 5, 2, GxEPD_BLACK);
+  display.fillEllipse(x + sx * 5, y + sy * 23, 2, 5, GxEPD_BLACK);
+  display.drawLine(x + sx * 18, y + sy * 8, x + sx * 26, y + sy * 4, GxEPD_BLACK);
+  display.drawLine(x + sx * 8, y + sy * 18, x + sx * 4, y + sy * 26, GxEPD_BLACK);
+}
+
+void drawBookFrame() {
+  display.drawRect(4, 4, 192, 192, GxEPD_BLACK);
+  display.drawRect(8, 8, 184, 184, GxEPD_BLACK);
+  drawBookCorner(12, 12, 1, 1);
+  drawBookCorner(188, 12, -1, 1);
+  drawBookCorner(12, 188, 1, -1);
+  drawBookCorner(188, 188, -1, -1);
+}
+
+void drawSetupFrame() {
+  display.drawRoundRect(2, 2, 196, 196, 12, GxEPD_BLACK);
+  display.drawRoundRect(6, 6, 188, 188, 10, GxEPD_BLACK);
+  display.fillCircle(15, 15, 2, GxEPD_BLACK);
+  display.fillCircle(185, 15, 2, GxEPD_BLACK);
+  display.fillCircle(15, 185, 2, GxEPD_BLACK);
+  display.fillCircle(185, 185, 2, GxEPD_BLACK);
+}
+
+void drawSetupArrows(int y) {
+  display.fillTriangle(24, y, 34, y - 7, 34, y + 7, GxEPD_BLACK);
+  display.fillTriangle(176, y, 166, y - 7, 166, y + 7, GxEPD_BLACK);
+  display.drawCircle(100, y, 5, GxEPD_BLACK);
+  display.fillCircle(100, y, 2, GxEPD_BLACK);
+}
+
+void drawBookDivider(int y) {
+  display.drawLine(38, y, 82, y, GxEPD_BLACK);
+  display.drawLine(118, y, 162, y, GxEPD_BLACK);
+  display.fillTriangle(91, y, 100, y - 5, 109, y, GxEPD_BLACK);
+  display.fillTriangle(91, y, 100, y + 5, 109, y, GxEPD_BLACK);
+  display.fillCircle(100, y, 2, GxEPD_WHITE);
+}
+
+void drawBookHeading(UiText title, UiText subtitle) {
+  drawBookFrame();
+  drawUiCentered(title, 58, 2);
+  drawBookDivider(68);
+  drawUiCentered(subtitle, 90, 1);
+}
+
+void drawBookChoice(int x, int y, int w, int h, const __FlashStringHelper *label, bool selected) {
+  if (selected) {
+    display.fillRoundRect(x, y, w, h, 8, GxEPD_BLACK);
+    display.setTextColor(GxEPD_WHITE);
+  } else {
+    display.drawRoundRect(x, y, w, h, 8, GxEPD_BLACK);
+    display.setTextColor(GxEPD_BLACK);
+  }
+  drawCenteredInBox(label, x, y, w, h, h >= 34 ? 2 : 1);
+  display.setTextColor(GxEPD_BLACK);
+}
+
+void drawLanguageScreen() {
+  drawSetupFrame();
+  drawBookChoice(15, 78, 50, 44, F("EN"), languageChoice == 0);
+  drawBookChoice(75, 78, 50, 44, F("BG"), languageChoice == 1);
+  drawBookChoice(135, 78, 50, 44, F("DE"), languageChoice == 2);
+  drawSetupArrows(164);
+}
+
+void drawVirus(int x, int y, int scalePercent = 100) {
+  drawScaledBitmap(x, y, FLASH_ADDRESS(VIRUS_STATUS_BITMAP),
+                   VIRUS_STATUS_BITMAP_WIDTH, VIRUS_STATUS_BITMAP_HEIGHT, scalePercent);
+}
+
+void drawPoopIcon(int x, int y, int scalePercent = 100) {
+  drawScaledBitmap(x, y, FLASH_ADDRESS(POOP_STATUS_BITMAP),
+                   POOP_STATUS_BITMAP_WIDTH, POOP_STATUS_BITMAP_HEIGHT, scalePercent);
+}
+
+void drawVirusOverlay() {
+  byte count = constrain(virusLevel, 1, MAX_VIRUS_LEVEL);
+  drawVirus(6, 76, 92);
+  if (count >= 2) drawVirus(29, 99, 76);
+  if (count >= 3) drawVirus(7, 115, 68);
+}
+
+void drawPoopOverlay() {
+  if (pet.poop == 1) {
+    drawPoopIcon(162, 110, 112);
+  } else if (pet.poop == 2) {
+    drawPoopIcon(148, 118, 82);
+    drawPoopIcon(170, 110, 98);
+  } else if (pet.poop >= 3) {
+    drawPoopIcon(141, 121, 68);
+    drawPoopIcon(157, 116, 84);
+    drawPoopIcon(173, 109, 96);
+  }
+}
+
+void drawSmellMark(int x, int y, int scalePercent = 100) {
+  drawScaledBitmap(x, y, FLASH_ADDRESS(SMELL_STATUS_BITMAP),
+                   SMELL_STATUS_BITMAP_WIDTH, SMELL_STATUS_BITMAP_HEIGHT, scalePercent);
+}
+
+void drawDirtOverlay() {
+  if (pet.dirty >= DIRTY_VISIBLE_THRESHOLD) {
+    drawSmellMark(158, 62, 100);
+  }
+  if (pet.dirty >= DIRTY_HALF_THRESHOLD) {
+    drawSmellMark(172, 67, 92);
+  }
+  if (pet.dirty >= 75) {
+    drawSmellMark(184, 74, 84);
+  }
+}
+
+void drawEgg(int x, int y, byte frame) {
+  int lean = 0;
+  drawScaledBitmap(x - EGG_WIDTH / 2 + lean, y - EGG_HEIGHT / 2,
+                   FLASH_ADDRESS(EGG_BITMAP), EGG_WIDTH, EGG_HEIGHT, 100);
+  display.drawLine(x - 16 + lean, y - 29, x - 9 + lean, y - 23, GxEPD_BLACK);
+  display.drawLine(x - 11 + lean, y - 21, x - 4 + lean, y - 17, GxEPD_BLACK);
+  display.drawLine(x + 7 + lean, y - 28, x + 13 + lean, y - 22, GxEPD_BLACK);
+  display.drawLine(x + 11 + lean, y - 16, x + 17 + lean, y - 11, GxEPD_BLACK);
+  display.drawLine(x - 17 + lean, y + 9, x - 10 + lean, y + 15, GxEPD_BLACK);
+  display.drawLine(x + 14 + lean, y + 6, x + 20 + lean, y + 11, GxEPD_BLACK);
+  if (frame >= 1) {
+    display.drawLine(x - 20 + lean, y - 3, x - 13 + lean, y + 1, GxEPD_BLACK);
+    display.drawLine(x + 17 + lean, y - 4, x + 11 + lean, y + 1, GxEPD_BLACK);
+    display.drawLine(x - 6 + lean, y + 18, x - 1 + lean, y + 11, GxEPD_BLACK);
+    display.drawLine(x + 4 + lean, y + 15, x + 8 + lean, y + 20, GxEPD_BLACK);
+  }
+  if (frame >= 2) {
+    display.drawLine(x - 18 + lean, y + 17, x - 12 + lean, y + 11, GxEPD_BLACK);
+    display.drawLine(x + 15 + lean, y + 15, x + 20 + lean, y + 9, GxEPD_BLACK);
+    display.fillTriangle(x - 3 + lean, y + 10, x + 1 + lean, y + 6, x + 4 + lean, y + 13, GxEPD_BLACK);
+  }
+}
+
+void drawEggScaled(int x, int y, byte frame, int scalePercent) {
+  int lean = 0;
+  int scaledWidth = EGG_WIDTH * scalePercent / 100;
+  int scaledHeight = EGG_HEIGHT * scalePercent / 100;
+  drawScaledBitmap(x - scaledWidth / 2 + lean, y - scaledHeight / 2,
+                   FLASH_ADDRESS(EGG_BITMAP), EGG_WIDTH, EGG_HEIGHT, scalePercent);
+  if (frame >= 1) {
+    display.drawLine(x - 22 + lean, y - 8, x - 12 + lean, y - 1, GxEPD_BLACK);
+    display.drawLine(x - 12 + lean, y - 1, x - 19 + lean, y + 8, GxEPD_BLACK);
+    display.drawLine(x + 19 + lean, y - 13, x + 10 + lean, y - 5, GxEPD_BLACK);
+  }
+  if (frame >= 2) {
+    display.drawLine(x + 10 + lean, y - 5, x + 20 + lean, y + 5, GxEPD_BLACK);
+    display.drawLine(x - 5 + lean, y + 15, x + 2 + lean, y + 5, GxEPD_BLACK);
+  }
+}
+
+void drawRleBitmap(int x, int y, FlashAddress rle, uint16_t width, uint16_t height) {
+  uint16_t px = 0;
+  uint16_t py = 0;
+  bool black = false;
+  uint32_t index = 0;
+  while (py < height) {
+    uint8_t run = READ_FLASH_BYTE(rle + index++);
+    if (run == 0) {
+      black = !black;
+      continue;
+    }
+    while (run > 0 && py < height) {
+      uint16_t chunk = run < (width - px) ? run : (width - px);
+      if (black) {
+        display.fillRect(x + px, y + py, chunk, 1, GxEPD_BLACK);
+      }
+      px += chunk;
+      run -= chunk;
+      if (px >= width) {
+        px = 0;
+        py++;
+      }
+    }
+    black = !black;
+  }
+}
+
+void drawRleBitmapScaled(int x, int y, FlashAddress rle, uint16_t width, uint16_t height, int scalePercent) {
+  uint16_t px = 0;
+  uint16_t py = 0;
+  bool black = false;
+  uint32_t index = 0;
+  while (py < height) {
+    uint8_t run = READ_FLASH_BYTE(rle + index++);
+    if (run == 0) {
+      black = !black;
+      continue;
+    }
+    while (run > 0 && py < height) {
+      uint16_t chunk = run < (width - px) ? run : (width - px);
+      if (black) {
+        int outputX = x + px * scalePercent / 100;
+        int outputY = y + py * scalePercent / 100;
+        int outputRight = x + (px + chunk) * scalePercent / 100;
+        int outputBottom = y + (py + 1) * scalePercent / 100;
+        display.fillRect(outputX, outputY, outputRight - outputX, outputBottom - outputY, GxEPD_BLACK);
+      }
+      px += chunk;
+      run -= chunk;
+      if (px >= width) {
+        px = 0;
+        py++;
+      }
+    }
+    black = !black;
+  }
+}
+
+FlashAddress catActionFrame(Action action, byte frame) {
+#define CAT_FRAME(NAME) \
+  (frame == 0 ? FLASH_ADDRESS(CAT_##NAME##_0_RLE) : \
+   frame == 1 ? FLASH_ADDRESS(CAT_##NAME##_1_RLE) : \
+   frame == 2 ? FLASH_ADDRESS(CAT_##NAME##_2_RLE) : FLASH_ADDRESS(CAT_##NAME##_3_RLE))
+  switch (action) {
+    case FEED:
+      return CAT_FRAME(FEED);
+    case WATER:
+      return CAT_FRAME(WATER);
+    case SLEEP:
+    case OVERNIGHT:
+      return CAT_FRAME(SLEEP);
+    case CLEAN:
+      return CAT_FRAME(CLEAN);
+    case MEDICINE:
+      return CAT_FRAME(MEDICINE);
+    case LEARN:
+      return CAT_FRAME(LEARN);
+    case PET_ACTION:
+      return CAT_FRAME(PET);
+    case GROOM:
+      return CAT_FRAME(GROOM);
+    case WASH:
+      return CAT_FRAME(WASH);
+    default:
+      return FLASH_ADDRESS(CAT_FEED_0_RLE);
+  }
+#undef CAT_FRAME
+}
+
+FlashAddress speciesActionFrame(Animal kind, Action action, byte frame) {
+#define ACTION_FRAME(PREFIX, NAME) \
+  (frame == 0 ? FLASH_ADDRESS(PREFIX##_##NAME##_0_RLE) : \
+   frame == 1 ? FLASH_ADDRESS(PREFIX##_##NAME##_1_RLE) : \
+   frame == 2 ? FLASH_ADDRESS(PREFIX##_##NAME##_2_RLE) : FLASH_ADDRESS(PREFIX##_##NAME##_3_RLE))
+#define ANIMAL_ACTION_FRAME(PREFIX) \
+  ((action == SLEEP || action == OVERNIGHT) ? ACTION_FRAME(PREFIX, SLEEP) : \
+   action == WATER ? ACTION_FRAME(PREFIX, WATER) : \
+   action == CLEAN ? ACTION_FRAME(PREFIX, CLEAN) : \
+   action == MEDICINE ? ACTION_FRAME(PREFIX, MEDICINE) : \
+   action == LEARN ? ACTION_FRAME(PREFIX, LEARN) : \
+   action == PET_ACTION ? ACTION_FRAME(PREFIX, PET) : \
+   action == GROOM ? ACTION_FRAME(PREFIX, GROOM) : \
+   action == WASH ? ACTION_FRAME(PREFIX, WASH) : ACTION_FRAME(PREFIX, FEED))
+  switch (kind) {
+    case DOG: return ANIMAL_ACTION_FRAME(DOG);
+    case BUNNY: return ANIMAL_ACTION_FRAME(BUNNY);
+    case PANDA: return ANIMAL_ACTION_FRAME(PANDA);
+    case DRAGON: return ANIMAL_ACTION_FRAME(DRAGON);
+    case FOX: return ANIMAL_ACTION_FRAME(FOX);
+    case PIG: return ANIMAL_ACTION_FRAME(PIG);
+    case HAMSTER: return ANIMAL_ACTION_FRAME(HAMSTER);
+    case PENGUIN: return ANIMAL_ACTION_FRAME(PENGUIN);
+    default: return ANIMAL_ACTION_FRAME(DOG);
+  }
+#undef ANIMAL_ACTION_FRAME
+#undef ACTION_FRAME
+}
+
+void animalBitmapInfo(Animal kind, FlashAddress &bitmap, byte &width, byte &height) {
+  bitmap = FLASH_ADDRESS(CAT_BITMAP);
+  width = CAT_WIDTH;
+  height = CAT_HEIGHT;
+  switch (kind) {
+    case CAT: bitmap = FLASH_ADDRESS(CAT_BITMAP); width = CAT_WIDTH; height = CAT_HEIGHT; break;
+    case DOG: bitmap = FLASH_ADDRESS(DOG_BITMAP); width = DOG_WIDTH; height = DOG_HEIGHT; break;
+    case BUNNY: bitmap = FLASH_ADDRESS(BUNNY_BITMAP); width = BUNNY_WIDTH; height = BUNNY_HEIGHT; break;
+    case PANDA: bitmap = FLASH_ADDRESS(PANDA_BITMAP); width = PANDA_WIDTH; height = PANDA_HEIGHT; break;
+    case DRAGON: bitmap = FLASH_ADDRESS(DRAGON_BITMAP); width = DRAGON_WIDTH; height = DRAGON_HEIGHT; break;
+    case FOX: bitmap = FLASH_ADDRESS(FOX_BITMAP); width = FOX_WIDTH; height = FOX_HEIGHT; break;
+    case PIG: bitmap = FLASH_ADDRESS(PIG_BITMAP); width = PIG_WIDTH; height = PIG_HEIGHT; break;
+    case HAMSTER: bitmap = FLASH_ADDRESS(HAMSTER_BITMAP); width = HAMSTER_WIDTH; height = HAMSTER_HEIGHT; break;
+    case PENGUIN: bitmap = FLASH_ADDRESS(PENGUIN_BITMAP); width = PENGUIN_WIDTH; height = PENGUIN_HEIGHT; break;
+    default: break;
+  }
+}
+
+void animalPoseBitmapInfo(Animal kind, AnimalPose pose, FlashAddress &bitmap, byte &width, byte &height) {
+  animalBitmapInfo(kind, bitmap, width, height);
+#define SET_ANIMAL_POSE(PREFIX) \
+  bitmap = pose == POSE_HAPPY ? FLASH_ADDRESS(PREFIX##_HAPPY_BITMAP) : \
+           pose == POSE_SLEEP ? FLASH_ADDRESS(PREFIX##_SLEEP_BITMAP) : FLASH_ADDRESS(PREFIX##_BITMAP)
+  switch (kind) {
+    case CAT: SET_ANIMAL_POSE(CAT); break;
+    case DOG: SET_ANIMAL_POSE(DOG); break;
+    case BUNNY: SET_ANIMAL_POSE(BUNNY); break;
+    case PANDA: SET_ANIMAL_POSE(PANDA); break;
+    case DRAGON: SET_ANIMAL_POSE(DRAGON); break;
+    case FOX: SET_ANIMAL_POSE(FOX); break;
+    case PIG: SET_ANIMAL_POSE(PIG); break;
+    case HAMSTER: SET_ANIMAL_POSE(HAMSTER); break;
+    case PENGUIN: SET_ANIMAL_POSE(PENGUIN); break;
+    default: break;
+  }
+#undef SET_ANIMAL_POSE
+}
+
+int animalDisplayScale(Animal kind) {
+  return 100;
+}
+
+void animalIdleFrameInfo(Animal kind, byte frame, FlashAddress &bitmap, byte &width, byte &height) {
+  animalBitmapInfo(kind, bitmap, width, height);
+  byte variant = frame % IDLE_ANIMATION_FRAMES;
+  if (variant == 0) return;
+#define SET_IDLE_VARIANT(PREFIX) \
+  bitmap = variant == 1 ? FLASH_ADDRESS(PREFIX##_IDLE_WINK_BITMAP) : \
+           variant == 2 ? FLASH_ADDRESS(PREFIX##_IDLE_SPARKLE_BITMAP) : FLASH_ADDRESS(PREFIX##_IDLE_PERK_BITMAP)
+  switch (kind) {
+    case CAT: SET_IDLE_VARIANT(CAT); break;
+    case DOG: SET_IDLE_VARIANT(DOG); break;
+    case BUNNY: SET_IDLE_VARIANT(BUNNY); break;
+    case PANDA: SET_IDLE_VARIANT(PANDA); break;
+    case DRAGON: SET_IDLE_VARIANT(DRAGON); break;
+    case FOX: SET_IDLE_VARIANT(FOX); break;
+    case PIG: SET_IDLE_VARIANT(PIG); break;
+    case HAMSTER: SET_IDLE_VARIANT(HAMSTER); break;
+    case PENGUIN: SET_IDLE_VARIANT(PENGUIN); break;
+    default: break;
+  }
+#undef SET_IDLE_VARIANT
+}
+
+void drawAnimalScaled(int x, int y, Animal kind, byte pose, int scalePercent) {
+  int bounce = pose % 2 ? -3 : 0;
+  FlashAddress bitmap;
+  byte width;
+  byte height;
+  animalBitmapInfo(kind, bitmap, width, height);
+  int effectiveScale = scalePercent * animalDisplayScale(kind) / 100;
+  int scaledWidth = width * effectiveScale / 100;
+  int scaledHeight = height * effectiveScale / 100;
+  drawScaledBitmap(x - scaledWidth / 2, y + bounce - scaledHeight / 2, bitmap, width, height, effectiveScale);
+}
+
+void drawAnimal(int x, int y, Animal kind, byte pose) {
+  FlashAddress bitmap;
+  byte width;
+  byte height;
+  animalIdleFrameInfo(kind, pose, bitmap, width, height);
+  int scalePercent = animalDisplayScale(kind);
+  int scaledWidth = width * scalePercent / 100;
+  int scaledHeight = height * scalePercent / 100;
+  drawScaledBitmap(x - scaledWidth / 2, y - scaledHeight / 2, bitmap, width, height, scalePercent);
+}
+
+void drawActionIcon(Action action, int x, int y, bool selected) {
+  if (selected) display.drawRoundRect(x - 2, y - 2, 32, 28, 6, GxEPD_BLACK);
+  FlashAddress bitmap;
+  switch (action) {
+    case FEED: bitmap = FLASH_ADDRESS(ACTION_FOOD_ICON_BITMAP); break;
+    case WATER: bitmap = FLASH_ADDRESS(ACTION_WATER_ICON_BITMAP); break;
+    case PLAY: bitmap = FLASH_ADDRESS(ACTION_PLAY_ICON_BITMAP); break;
+    case SLEEP: bitmap = FLASH_ADDRESS(ACTION_MOON_ICON_BITMAP); break;
+    case OVERNIGHT: bitmap = FLASH_ADDRESS(ACTION_OVERNIGHT_ICON_BITMAP); break;
+    case CLEAN: bitmap = FLASH_ADDRESS(ACTION_CLEAN_ICON_BITMAP); break;
+    case MEDICINE: bitmap = FLASH_ADDRESS(ACTION_MEDICINE_ICON_BITMAP); break;
+    case LEARN: bitmap = FLASH_ADDRESS(ACTION_LEARN_ICON_BITMAP); break;
+    case PET_ACTION: bitmap = FLASH_ADDRESS(ACTION_PET_ICON_BITMAP); break;
+    case GROOM: bitmap = FLASH_ADDRESS(ACTION_GROOM_ICON_BITMAP); break;
+    case WASH: bitmap = FLASH_ADDRESS(ACTION_WASH_ICON_BITMAP); break;
+    case SETTINGS: bitmap = FLASH_ADDRESS(ACTION_BED_ICON_BITMAP); break;
+    default: return;
+  }
+  drawScaledBitmap(x, y, bitmap, ACTION_ICON_WIDTH, ACTION_ICON_HEIGHT, 100);
+}
+
+void printActionName(Action action) {
+  if (useCyrillicText()) {
+    setCyrillicFont(1, GxEPD_BLACK);
+    u8g2Text.print(bgText(actionLabel(action)));
+  } else {
+    display.print(uiText(actionLabel(action)));
+  }
+}
+
+void drawHome() {
+  drawMeter(5, 8, 90, 0, pet.food);
+  drawMeter(5, 22, 90, 1, pet.water);
+  drawMeter(105, 8, 90, 2, pet.happy);
+  drawMeter(105, 22, 90, 3, pet.energy);
+  drawAnimal(100, 88, animal, idleAnimationFrame);
+  if (pet.poop) drawPoopOverlay();
+  if (pet.sick) drawVirusOverlay();
+  if (petIsDirty()) drawDirtOverlay();
+  for (byte i = 0; i < SETTINGS; i++) {
+    int x = i < 6 ? 3 + i * 32 : 18 + (i - 6) * 36;
+    int y = i < 6 ? 144 : 173;
+    drawActionIcon((Action)i, x, y, selectedAction == i);
+  }
+}
+
+void drawBriefcase(int x, int y) {
+  display.drawRoundRect(x, y, 38, 27, 4, GxEPD_BLACK);
+  display.drawRoundRect(x + 12, y - 6, 14, 8, 3, GxEPD_BLACK);
+  display.drawLine(x, y + 11, x + 38, y + 11, GxEPD_BLACK);
+  display.fillCircle(x + 19, y + 11, 2, GxEPD_BLACK);
+}
+
+void drawGrownUpScreen() {
+  display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
+  display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
+  drawUiCentered(TXT_GROWN_TITLE, 18, 2);
+  drawUiCentered(TXT_GROWN_DAY, 43, 1);
+  display.drawLine(38, 58, 162, 58, GxEPD_BLACK);
+  drawAnimalScaled(82, 112, animal, 1, 78);
+  drawBriefcase(126, 123);
+  display.drawLine(36, 158, 164, 158, GxEPD_BLACK);
+  display.fillRect(47, 155, 14, 4, GxEPD_BLACK);
+  display.fillRect(139, 155, 14, 4, GxEPD_BLACK);
+  drawUiCentered(TXT_GROWN_WORK, 169, 1);
+}
+
+void printTwoDigits(unsigned int value) {
+  if (value < 10) display.print('0');
+  display.print(value);
+}
+
+void drawHospitalBuildingBitmap() {
+  drawScaledBitmap((200 - HOSPITAL_STATUS_BITMAP_WIDTH) / 2, 42,
+                   FLASH_ADDRESS(HOSPITAL_STATUS_BITMAP),
+                   HOSPITAL_STATUS_BITMAP_WIDTH, HOSPITAL_STATUS_BITMAP_HEIGHT, 100);
+}
+
+void drawHospitalScreen() {
+  display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
+  display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
+  drawUiCentered(TXT_HOSPITAL_TITLE, 18, 2);
+  drawHospitalBuildingBitmap();
+  drawUiCentered(TXT_HOSPITAL_REST, 145, 1);
+  drawUiCentered(TXT_HOSPITAL_TIMER, 160, 1);
+  unsigned int hours = hospitalMinutesLeft / 60;
+  byte minutes = hospitalMinutesLeft % 60;
+  display.setTextSize(2);
+  display.setCursor(70, 176);
+  printTwoDigits(hours);
+  display.print(':');
+  printTwoDigits(minutes);
+}
+
+void drawLargeHeart(int x, int y) {
+  drawScaledBitmap(x - LOVE_HEART_BITMAP_WIDTH / 2, y - LOVE_HEART_BITMAP_HEIGHT / 2,
+                   FLASH_ADDRESS(LOVE_HEART_BITMAP),
+                   LOVE_HEART_BITMAP_WIDTH, LOVE_HEART_BITMAP_HEIGHT, 100);
+}
+
+void drawLoveMessageScreen() {
+  display.drawRoundRect(12, 18, 176, 164, 16, GxEPD_BLACK);
+  display.drawRoundRect(17, 23, 166, 154, 14, GxEPD_BLACK);
+  drawUiCentered(TXT_LOVE_MESSAGE, 50, 2);
+  drawLargeHeart(100, 112);
+}
+
+void drawDebugValue(const char *label, int value, int x, int y) {
+  display.setTextSize(1);
+  display.setCursor(x, y);
+  display.print(label);
+  display.print(':');
+  display.print(value);
+}
+
+void drawDebugFlag(const char *label, bool value, int x, int y) {
+  display.setTextSize(1);
+  display.setCursor(x, y);
+  display.print(label);
+  display.print(':');
+  display.print(value ? 'Y' : 'N');
+}
+
+void drawDebugStatsScreen() {
+  display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
+  display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
+  display.setTextSize(2);
+  display.setCursor(43, 20);
+  display.print(F("DEBUG"));
+  display.drawLine(25, 44, 175, 44, GxEPD_BLACK);
+
+  drawDebugValue("FOOD", pet.food, 18, 56);
+  drawDebugValue("WATR", pet.water, 108, 56);
+  drawDebugValue("HAP", pet.happy, 18, 72);
+  drawDebugValue("ENRG", pet.energy, 108, 72);
+  drawDebugValue("HLTH", pet.health, 18, 88);
+  drawDebugValue("LRN", pet.learning, 108, 88);
+  drawDebugValue("POOP", pet.poop, 18, 104);
+  drawDebugValue("DIRT", pet.dirty, 108, 104);
+  drawDebugValue("VIR", virusLevel, 18, 120);
+  drawDebugValue("AGE", pet.ageDays, 108, 120);
+  drawDebugValue("F0", foodEmptyTicks, 18, 136);
+  drawDebugValue("W0", waterEmptyTicks, 108, 136);
+  drawDebugValue("HOSP", hospitalMinutesLeft, 18, 152);
+  drawDebugValue("SLP", forcedSleepMinutesLeft, 108, 152);
+  drawDebugFlag("SICK", pet.sick, 18, 168);
+  drawDebugFlag("SLEEP", pet.sleeping, 108, 168);
+}
+
+void drawSetupNumber(UiText title, int value) {
+  drawSetupFrame();
+  drawUiCentered(title, 30, 2);
+  drawBookDivider(54);
+  display.drawRoundRect(55, 70, 90, 72, 14, GxEPD_BLACK);
+  display.setTextSize(value > 99 ? 3 : 4);
+  display.setCursor(value > 99 ? 64 : value < 10 ? 84 : 70, value > 99 ? 101 : 96);
+  if (value < 10) display.print('0');
+  display.print(value);
+  drawSetupArrows(174);
+}
+
+void drawSetupScreen() {
+  if (screen == SET_CLOCK) {
+    drawSetupNumber(editField == 0 ? TXT_SET_HOUR : TXT_SET_MINUTE,
+                    editField == 0 ? gameClock.hour : gameClock.minute);
+  } else {
+    drawSetupFrame();
+    drawAnimalScaled(100, 78, (Animal)animalChoice, 0, 100);
+    display.fillRoundRect(58, 164, 84, 24, 10, GxEPD_BLACK);
+    display.setTextColor(GxEPD_WHITE);
+    drawCenteredInBox(animalName((Animal)animalChoice), 58, 164, 84, 24, 1);
+    display.setTextColor(GxEPD_BLACK);
+    display.fillTriangle(16, 100, 28, 92, 28, 108, GxEPD_BLACK);
+    display.fillTriangle(184, 100, 172, 92, 172, 108, GxEPD_BLACK);
+  }
+}
+
+void drawEggScreen() {
+  drawEggScaled(100, 100, eggFrame, 100);
+}
+
+void drawScene() {
+  if (animal == CAT) {
+    drawRleBitmap((200 - CAT_ACTION_SCENE_WIDTH) / 2,
+                  (200 - CAT_ACTION_SCENE_HEIGHT) / 2,
+                  catActionFrame(sceneAction, sceneFrame % 4),
+                  CAT_ACTION_SCENE_WIDTH, CAT_ACTION_SCENE_HEIGHT);
+  } else {
+    drawRleBitmap((200 - SPECIES_ACTION_SCENE_WIDTH) / 2,
+                  (200 - SPECIES_ACTION_SCENE_HEIGHT) / 2,
+                  speciesActionFrame(animal, sceneAction, sceneFrame % 4),
+                  SPECIES_ACTION_SCENE_WIDTH, SPECIES_ACTION_SCENE_HEIGHT);
+  }
+}
+
+void drawMenuRow(bool selected, int y, UiText label) {
+  if (selected) {
+    display.fillRoundRect(17, y, 166, 28, 8, GxEPD_BLACK);
+    drawUiCenteredInBox(label, 17, y, 166, 28, 1, GxEPD_WHITE);
+  } else {
+    display.drawRoundRect(17, y, 166, 28, 8, GxEPD_BLACK);
+    drawUiCenteredInBox(label, 17, y, 166, 28, 1, GxEPD_BLACK);
+  }
+  display.setTextColor(GxEPD_BLACK);
+}
+
+void drawGameMenuRow(byte index, int y, UiText label) {
+  drawMenuRow(gameChoice == index, y, label);
+}
+
+void drawOptionRow(byte index, int y, UiText label) {
+  drawMenuRow(editField == index, y, label);
+}
+
+void drawGameMenu() {
+  display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
+  display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
+  display.setTextColor(GxEPD_BLACK);
+  drawGameMenuRow(0, 38, TXT_GAME_HIGH_LOW_MENU);
+  drawGameMenuRow(1, 86, TXT_GAME_COIN);
+  drawGameMenuRow(2, 134, TXT_GAME_SHELL);
+}
+
+void drawMiniGameFrame(UiText title) {
+  display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
+  display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
+  display.setTextColor(GxEPD_BLACK);
+  drawUiCenteredInBox(title, 18, 18, 164, 28, 2);
+  display.drawLine(29, 50, 171, 50, GxEPD_BLACK);
+  display.drawCircle(36, 43, 3, GxEPD_BLACK);
+  display.drawCircle(164, 43, 3, GxEPD_BLACK);
+}
+
+void drawChoiceButton(int x, int y, int w, UiText label) {
+  display.drawRoundRect(x, y, w, 24, 7, GxEPD_BLACK);
+  drawUiCenteredInBox(label, x, y, w, 24, 1);
+}
+
+void drawHigherLowerGame() {
+  drawMiniGameFrame(TXT_GAME_HIGH_LOW_TITLE);
+  display.drawRoundRect(61, 61, 78, 80, 10, GxEPD_BLACK);
+  display.drawRoundRect(68, 68, 64, 66, 7, GxEPD_BLACK);
+  display.setTextSize(5);
+  int x = gameCurrentNumber < 10 ? 86 : 72;
+  display.setCursor(x, 87);
+  display.print(gameCurrentNumber);
+  display.setTextSize(1);
+  if (miniGamePhase == MINI_GAME_PICK) {
+    display.fillTriangle(54, 154, 43, 143, 65, 143, GxEPD_BLACK);
+    display.fillTriangle(146, 143, 135, 154, 157, 154, GxEPD_BLACK);
+    drawChoiceButton(25, 160, 70, TXT_LOWER);
+    drawChoiceButton(105, 160, 70, TXT_HIGHER);
+  } else {
+    display.drawRoundRect(65, 139, 70, 24, 6, GxEPD_BLACK);
+    drawUiText(TXT_NEXT, 76, 147, 1);
+    display.setCursor(106, 147);
+    display.print(gameNextNumber);
+    display.fillRoundRect(38, 168, 124, 18, 5, GxEPD_BLACK);
+    drawUiCenteredInBox(miniGameWon ? TXT_CORRECT_20 : TXT_WRONG_5, 38, 168, 124, 18, 1, GxEPD_WHITE);
+    display.setTextColor(GxEPD_BLACK);
+  }
+}
+
+void drawCoinTossGame() {
+  drawMiniGameFrame(TXT_GAME_COIN);
+  display.drawCircle(100, 91, 35, GxEPD_BLACK);
+  display.drawCircle(100, 91, 29, GxEPD_BLACK);
+  display.drawCircle(100, 91, 21, GxEPD_BLACK);
+  display.drawLine(82, 76, 91, 69, GxEPD_BLACK);
+  display.drawLine(109, 113, 118, 106, GxEPD_BLACK);
+  display.drawLine(76, 91, 82, 91, GxEPD_BLACK);
+  display.drawLine(118, 91, 124, 91, GxEPD_BLACK);
+  display.setTextSize(3);
+  display.setCursor(91, 81);
+  if (miniGamePhase == MINI_GAME_RESULT) {
+    if (useCyrillicText()) drawUiText(coinAnswer == 0 ? TXT_COIN_HEAD_MARK : TXT_COIN_TAIL_MARK, 93, 80, 2);
+    else display.print(uiText(coinAnswer == 0 ? TXT_COIN_HEAD_MARK : TXT_COIN_TAIL_MARK));
+  }
+  else display.print("?");
+  display.setTextSize(1);
+  if (miniGamePhase == MINI_GAME_PICK) {
+    drawChoiceButton(22, 154, 72, TXT_HEADS);
+    drawChoiceButton(106, 154, 72, TXT_TAILS);
+    display.fillTriangle(58, 146, 47, 135, 69, 135, GxEPD_BLACK);
+    display.fillTriangle(142, 135, 131, 146, 153, 146, GxEPD_BLACK);
+  } else {
+    display.fillRoundRect(39, 150, 122, 18, 5, GxEPD_BLACK);
+    drawUiCenteredInBox(miniGameWon ? TXT_YOU_GOT_IT : TXT_MISSED, 39, 150, 122, 18, 1, GxEPD_WHITE);
+    display.setTextColor(GxEPD_BLACK);
+    drawUiCentered(miniGameWon ? TXT_PLUS_20_HAPPY : TXT_PLUS_5_HAPPY, 176, 1);
+  }
+}
+
+void drawCup(int x, int y, bool selected, bool open, bool hasBall) {
+  int cupY = open ? y - 14 : y;
+  if (selected && !open) display.drawRoundRect(x - 23, cupY - 7, 46, 52, 8, GxEPD_BLACK);
+  display.drawRoundRect(x - 18, cupY, 36, 9, 4, GxEPD_BLACK);
+  display.drawLine(x - 15, cupY + 8, x - 10, cupY + 36, GxEPD_BLACK);
+  display.drawLine(x + 15, cupY + 8, x + 10, cupY + 36, GxEPD_BLACK);
+  display.drawLine(x - 10, cupY + 36, x + 10, cupY + 36, GxEPD_BLACK);
+  display.drawLine(x - 13, cupY + 18, x + 13, cupY + 18, GxEPD_BLACK);
+  display.drawLine(x - 12, cupY + 28, x + 12, cupY + 28, GxEPD_BLACK);
+  display.fillRoundRect(x - 18, cupY + 39, 36, 4, 2, GxEPD_BLACK);
+  if (open && hasBall) {
+    display.fillCircle(x, y + 37, 5, GxEPD_BLACK);
+    display.drawCircle(x, y + 37, 7, GxEPD_BLACK);
+  }
+}
+
+void drawShellGame() {
+  drawMiniGameFrame(TXT_GAME_SHELL);
+  display.drawLine(28, 126, 172, 126, GxEPD_BLACK);
+  for (byte i = 0; i < 3; i++) {
+    drawCup(52 + i * 48, 77, shellPick == i, miniGamePhase == MINI_GAME_RESULT, shellAnswer == i);
+  }
+  display.setTextSize(1);
+  if (miniGamePhase == MINI_GAME_PICK) {
+    drawUiCentered(TXT_FIND_BALL, 140, 1);
+    drawChoiceButton(23, 160, 58, TXT_MOVE);
+    drawChoiceButton(119, 160, 58, TXT_MOVE);
+  } else {
+    display.fillRoundRect(38, 152, 124, 18, 5, GxEPD_BLACK);
+    drawUiCenteredInBox(miniGameWon ? TXT_FOUND_20 : TXT_EMPTY_5, 38, 152, 124, 18, 1, GxEPD_WHITE);
+    display.setTextColor(GxEPD_BLACK);
+  }
+}
+
+void drawGamePlay() {
+  if (activeGame == GAME_HIGH_LOW) drawHigherLowerGame();
+  else if (activeGame == GAME_COIN_TOSS) drawCoinTossGame();
+  else drawShellGame();
+}
+
+void drawOptions() {
+  drawBookHeading(TXT_OPTIONS, TXT_CHANGE);
+  drawOptionRow(0, 94, TXT_SET_CLOCK);
+  drawOptionRow(1, 138, TXT_NEW_EGG);
+  drawUiCentered(TXT_OPTIONS_HINT, 181, 1);
+}
+
+void refreshDisplay() {
+  display.setFullWindow();
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    display.setTextColor(GxEPD_BLACK);
+    if (screen == LANGUAGE) drawLanguageScreen();
+    else if (screen == SET_CLOCK || screen == SELECT_ANIMAL) drawSetupScreen();
+    else if (screen == EGG) drawEggScreen();
+    else if (screen == HOME) drawHome();
+    else if (screen == ACTION_SCENE) drawScene();
+    else if (screen == GAME_MENU) drawGameMenu();
+    else if (screen == GAME_PLAY) drawGamePlay();
+    else if (screen == OPTIONS) drawOptions();
+    else if (screen == GROWN_UP) drawGrownUpScreen();
+    else if (screen == HOSPITAL) drawHospitalScreen();
+    else if (screen == LOVE_MESSAGE) drawLoveMessageScreen();
+    else if (screen == DEBUG_STATS) drawDebugStatsScreen();
+  } while (display.nextPage());
+  display.hibernate();
+  displayDirty = false;
+}
+
+void animateAction(Action action) {
+  sceneAction = action;
+  screen = ACTION_SCENE;
+  for (sceneFrame = 0; sceneFrame < 4; sceneFrame++) {
+    refreshDisplay();
+    chirp(650 + sceneFrame * 180, 70);
+    delay(160);
+  }
+  sceneFrame = 3;
+  delay(1000);
+  screen = HOME;
+  displayDirty = true;
+  refreshDisplay();
+}
+
+void animateEggHatch() {
+  screen = HATCHING;
+  for (byte frame = 0; frame < 4; frame++) {
+    display.setFullWindow();
+    display.firstPage();
+    do {
+      display.fillScreen(GxEPD_WHITE);
+      if (frame < 3) {
+        drawEggScaled(100, 100, frame, 100);
+      } else {
+        drawAnimalScaled(100, 96, animal, 1, 100);
+        drawHeart(24, 54);
+        drawHeart(164, 62);
+      }
+    } while (display.nextPage());
+    chirp(500 + frame * 180, 160);
+    delay(350);
+  }
+  hatchTune();
+  screen = HOME;
+  saveGame(HOME);
+  displayDirty = true;
+}
+
+void startEgg() {
+  pet = {80, 80, 80, 80, 100, 0, 0, 0, false, false, 0};
+  virusLevel = 0;
+  lowStatusAlertMask = currentLowStatusMask();
+  lowStatusFlashOn = false;
+  forcedSleepMinutesLeft = 0;
+  hospitalMinutesLeft = 0;
+  resetAwayHungerTimer();
+  waterDepleteRemainder = 0;
+  resetEmptyNeedTimers();
+  resetAttentionTimer();
+  resetRecoveryBonus();
+  hatchMinutesLeft = random(120, 301);
+  screen = EGG;
+  eggFrame = 0;
+  workShortcutRightCount = 0;
+  workShortcutLeftCount = 0;
+  resetDebugShortcut();
+  resetTestShortcut();
+  saveGame(EGG);
+  happyTune();
+  displayDirty = true;
+}
+
+void resetWorkShortcut() {
+  workShortcutRightCount = 0;
+  workShortcutLeftCount = 0;
+}
+
+void resetTestShortcut() {
+  testShortcutRightCount = 0;
+  testShortcutLeftCount = 0;
+}
+
+void resetDebugShortcut() {
+  debugShortcutLeftCount = 0;
+  debugShortcutRightCount = 0;
+}
+
+void enterGrownUpScreen() {
+  if (pet.ageDays < PET_ADULT_DAYS) pet.ageDays = PET_ADULT_DAYS;
+  pet.sleeping = false;
+  forcedSleepMinutesLeft = 0;
+  hospitalMinutesLeft = 0;
+  resetAwayHungerTimer();
+  resetEmptyNeedTimers();
+  resetAttentionTimer();
+  resetRecoveryBonus();
+  screen = GROWN_UP;
+  resetWorkShortcut();
+  resetTestShortcut();
+  resetDebugShortcut();
+  saveGame(GROWN_UP);
+  displayDirty = true;
+  grownUpTune();
+}
+
+void checkAgeLimit() {
+  if (screen != EGG && screen != GROWN_UP && screen != HOSPITAL && pet.ageDays >= PET_ADULT_DAYS) {
+    enterGrownUpScreen();
+  }
+}
+
+bool perfectCareCondition() {
+  return !pet.sleeping &&
+         pet.poop == 0 &&
+         pet.dirty == 0 &&
+         !pet.sick &&
+         virusLevel == 0 &&
+         pet.food > 50 &&
+         pet.water > 50 &&
+         pet.energy > 50 &&
+         pet.happy == 100;
+}
+
+void dismissLoveMessage() {
+  if (screen != LOVE_MESSAGE) return;
+  screen = HOME;
+  displayDirty = true;
+}
+
+void enterLoveMessage() {
+  loveMessageShown = true;
+  loveMessageStarted = millis();
+  screen = LOVE_MESSAGE;
+  displayDirty = true;
+  loveTune();
+}
+
+void checkLoveMessageTrigger() {
+  if (!perfectCareCondition()) {
+    loveMessageShown = false;
+    return;
+  }
+  if (screen == HOME && !loveMessageShown) enterLoveMessage();
+}
+
+void updateLoveMessage(unsigned long now) {
+  if (screen == LOVE_MESSAGE && now - loveMessageStarted >= LOVE_MESSAGE_MS) dismissLoveMessage();
+}
+
+void updateIdleAnimation(unsigned long now) {
+  if (screen != HOME) {
+    idleAnimationFrame = 0;
+    lastIdleAnimation = now;
+    return;
+  }
+  if (!IDLE_ANIMATION_AUTO_REFRESH) {
+    if (idleAnimationFrame != 0) {
+      idleAnimationFrame = 0;
+      displayDirty = true;
+    }
+    lastIdleAnimation = now;
+    return;
+  }
+  if (!activeWindowOpen(now)) {
+    if (idleAnimationFrame != 0) {
+      idleAnimationFrame = 0;
+      displayDirty = true;
+    }
+    lastIdleAnimation = now;
+    return;
+  }
+  if (now - lastIdleAnimation >= IDLE_ANIMATION_MS) {
+    lastIdleAnimation = now;
+    idleAnimationFrame = (idleAnimationFrame + 1) % IDLE_ANIMATION_FRAMES;
+    displayDirty = true;
+  }
+}
+
+void applyEmptyNeedMood() {
+  if (pet.food == 0 || pet.water == 0) pet.happy = 0;
+}
+
+bool petIsDirty() {
+  return pet.dirty >= DIRTY_VISIBLE_THRESHOLD;
+}
+
+bool petIsVeryDirty() {
+  return pet.dirty >= DIRTY_HALF_THRESHOLD;
+}
+
+bool dirtAlertThresholdCrossed(byte before, byte after) {
+  return (before < DIRTY_VISIBLE_THRESHOLD && after >= DIRTY_VISIBLE_THRESHOLD) ||
+         (before < DIRTY_HALF_THRESHOLD && after >= DIRTY_HALF_THRESHOLD) ||
+         (before < 75 && after >= 75) ||
+         (before < DIRTY_FULL_THRESHOLD && after >= DIRTY_FULL_THRESHOLD);
+}
+
+bool addDirt(byte amount) {
+  byte before = pet.dirty;
+  pet.dirty = clampStat(pet.dirty + amount);
+  bool statusAlert = dirtAlertThresholdCrossed(before, pet.dirty);
+  if (before < DIRTY_HALF_THRESHOLD && pet.dirty >= DIRTY_HALF_THRESHOLD) {
+    spendHappiness(DIRTY_HALF_HAPPY_COST);
+  }
+  if (pet.dirty >= DIRTY_FULL_THRESHOLD && pet.happy > DIRTY_FULL_HAPPY_LIMIT) {
+    pet.happy = DIRTY_FULL_HAPPY_LIMIT;
+    applyEmptyNeedMood();
+  }
+  return statusAlert;
+}
+
+void reduceDirt(byte amount) {
+  pet.dirty = amount >= pet.dirty ? 0 : pet.dirty - amount;
+}
+
+void gainHappiness(byte amount) {
+  pet.happy = clampStat(pet.happy + amount);
+  applyEmptyNeedMood();
+}
+
+void spendHappiness(byte amount) {
+  pet.happy = clampStat(pet.happy - amount);
+  applyEmptyNeedMood();
+}
+
+void spendFood(byte amount) {
+  pet.food = clampStat(pet.food - amount);
+  applyEmptyNeedMood();
+}
+
+void spendWater(byte amount) {
+  pet.water = clampStat(pet.water - amount);
+  applyEmptyNeedMood();
+}
+
+void spendEnergy(byte amount) {
+  pet.energy = clampStat(pet.energy - amount);
+  if (pet.energy == 0) startForcedSleep();
+}
+
+bool restoreFood(byte amount) {
+  byte before = pet.food;
+  byte after = clampStat(pet.food + amount);
+  byte restored = after - before;
+  bool statusAlert = false;
+  pet.food = after;
+  if (restored > 0) statusAlert = addDirt(FEED_DIRT_GAIN);
+  if (restored > FOOD_WATER_THRESHOLD ||
+      (before <= FOOD_WATER_THRESHOLD && after > FOOD_WATER_THRESHOLD)) {
+    spendWater(FOOD_RESTORE_WATER_COST);
+  }
+  if (pet.food > 0) foodEmptyTicks = 0;
+  applyEmptyNeedMood();
+  return statusAlert;
+}
+
+byte waterDrainPerNeedsTick() {
+  waterDepleteRemainder += WATER_DRAIN_EXTRA_TICKS;
+  if (waterDepleteRemainder >= WATER_DRAIN_DENOMINATOR) {
+    waterDepleteRemainder -= WATER_DRAIN_DENOMINATOR;
+    return 4;
+  }
+  return 3;
+}
+
+void makeVeryHungry() {
+  if (pet.food > VERY_HUNGRY_FOOD) pet.food = VERY_HUNGRY_FOOD;
+}
+
+void resetAwayHungerTimer() {
+  awayHungerMinutes = 0;
+}
+
+void resetEmptyNeedTimers() {
+  foodEmptyTicks = 0;
+  waterEmptyTicks = 0;
+}
+
+void resetAttentionTimer() {
+  attentionTicks = 0;
+}
+
+void resetRecoveryBonus() {
+  recoveryBonusTicks = 0;
+}
+
+void startRecoveryBonus() {
+  recoveryBonusTicks = RECOVERY_BONUS_TICKS;
+}
+
+void tickRecoveryBonus() {
+  if (recoveryBonusTicks > 0) recoveryBonusTicks--;
+}
+
+byte healthLimitForEmptyNeed(byte emptyTicks, byte survivalTicks) {
+  if (emptyTicks >= survivalTicks) return 0;
+  return ((unsigned int)(survivalTicks - emptyTicks) * 100U) / survivalTicks;
+}
+
+void updateHappinessPressure(bool emptyNeed) {
+  if (emptyNeed) {
+    pet.happy = 0;
+    return;
+  }
+
+  byte penalty = 0;
+  if (pet.sick) penalty += SICK_HAPPY_COST;
+  if (petIsDirty()) penalty += DIRTY_HAPPY_COST;
+  if (pet.energy < 20) penalty += LOW_ENERGY_HAPPY_COST;
+  if (!pet.sleeping) {
+    if (attentionTicks < ATTENTION_HAPPY_DELAY_TICKS) attentionTicks++;
+    if (attentionTicks >= ATTENTION_HAPPY_DELAY_TICKS) penalty += NEGLECT_HAPPY_COST;
+  }
+  if (penalty > 0) spendHappiness(penalty);
+}
+
+byte virusRiskScore() {
+  byte risk = 0;
+  if (pet.poop >= 2) risk++;
+  if (petIsVeryDirty()) risk++;
+  if (pet.food < LOW_NEED_VIRUS_THRESHOLD) risk++;
+  if (pet.water < LOW_NEED_VIRUS_THRESHOLD) risk++;
+  if (recoveryBonusTicks > 0 && risk > 0) risk--;
+  return risk;
+}
+
+void updateEmptyNeedSurvival() {
+  if (pet.food == 0) {
+    if (foodEmptyTicks < FOOD_EMPTY_SURVIVAL_TICKS) foodEmptyTicks++;
+  } else {
+    foodEmptyTicks = 0;
+  }
+
+  if (pet.water == 0) {
+    if (waterEmptyTicks < WATER_EMPTY_SURVIVAL_TICKS) waterEmptyTicks++;
+  } else {
+    waterEmptyTicks = 0;
+  }
+
+  if (pet.food == 0 || pet.water == 0) {
+    pet.happy = 0;
+    byte healthLimit = 100;
+    if (pet.food == 0) {
+      healthLimit = min(healthLimit, healthLimitForEmptyNeed(foodEmptyTicks, FOOD_EMPTY_SURVIVAL_TICKS));
+    }
+    if (pet.water == 0) {
+      healthLimit = min(healthLimit, healthLimitForEmptyNeed(waterEmptyTicks, WATER_EMPTY_SURVIVAL_TICKS));
+    }
+    if (pet.health > healthLimit) pet.health = healthLimit;
+  }
+}
+
+void startForcedSleep() {
+  if (screen == EGG || screen == GROWN_UP || screen == HOSPITAL) return;
+  forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
+  pet.sleeping = true;
+  screen = HOME;
+  resetAwayHungerTimer();
+  saveGame(HOME);
+  displayDirty = true;
+}
+
+void recoverFromHospital() {
+  hospitalMinutesLeft = 0;
+  pet.food = max(pet.food, HOSPITAL_RECOVER_FOOD);
+  pet.water = max(pet.water, HOSPITAL_RECOVER_WATER);
+  pet.happy = max(pet.happy, HOSPITAL_RECOVER_HAPPY);
+  pet.energy = max(pet.energy, HOSPITAL_RECOVER_ENERGY);
+  pet.health = max(pet.health, HOSPITAL_RECOVER_HEALTH);
+  pet.poop = 0;
+  pet.dirty = 0;
+  pet.sick = false;
+  virusLevel = 0;
+  pet.sleeping = false;
+  forcedSleepMinutesLeft = 0;
+  waterDepleteRemainder = 0;
+  resetAwayHungerTimer();
+  resetEmptyNeedTimers();
+  resetAttentionTimer();
+  resetRecoveryBonus();
+  resetTestShortcut();
+  screen = HOME;
+  lowStatusAlertMask = currentLowStatusMask();
+  lowStatusFlashOn = false;
+  saveGame(HOME);
+  displayDirty = true;
+}
+
+void enterHospital() {
+  if (screen == EGG || screen == GROWN_UP || screen == HOSPITAL) return;
+  hospitalMinutesLeft = HOSPITAL_MINUTES;
+  pet.health = 0;
+  pet.happy = 0;
+  pet.sleeping = false;
+  forcedSleepMinutesLeft = 0;
+  resetAwayHungerTimer();
+  resetRecoveryBonus();
+  resetTestShortcut();
+  screen = HOSPITAL;
+  saveGame(HOSPITAL);
+  displayDirty = true;
+  hospitalTune();
+}
+
+void updateHospitalTimer() {
+  if (screen != HOSPITAL) return;
+  if (hospitalMinutesLeft > 0) hospitalMinutesLeft--;
+  if (hospitalMinutesLeft == 0) {
+    recoverFromHospital();
+  }
+}
+
+void updateAwayHunger() {
+  if (screen == EGG || screen == GROWN_UP || screen == HOSPITAL || pet.sleeping) {
+    resetAwayHungerTimer();
+    return;
+  }
+  if (awayHungerMinutes < AWAY_HUNGER_MINUTES) awayHungerMinutes++;
+  if (awayHungerMinutes >= AWAY_HUNGER_MINUTES) {
+    spendFood(AWAY_HUNGER_FOOD_COST);
+    updateLowStatusAlerts(true);
+    resetAwayHungerTimer();
+    saveGame(HOME);
+    displayDirty = true;
+  }
+}
+
+void advanceClock() {
+  if (screen == HOSPITAL) {
+    updateHospitalTimer();
+  } else {
+    updateAwayHunger();
+    if (forcedSleepMinutesLeft > 0) {
+      forcedSleepMinutesLeft--;
+      pet.sleeping = true;
+      if (forcedSleepMinutesLeft == 0) {
+        pet.sleeping = false;
+        makeVeryHungry();
+        updateLowStatusAlerts(true);
+        saveGame(HOME);
+        displayDirty = true;
+      }
+    }
+  }
+  gameClock.minute++;
+  if (gameClock.minute < 60) return;
+  gameClock.minute = 0;
+  gameClock.hour++;
+  if (gameClock.hour < 24) return;
+  gameClock.hour = 0;
+  gameClock.day++;
+  if (pet.ageDays < PET_ADULT_DAYS) pet.ageDays++;
+  if (gameClock.day > daysInMonth(gameClock.month, gameClock.year)) {
+    gameClock.day = 1;
+    gameClock.month++;
+    if (gameClock.month > 12) {
+      gameClock.month = 1;
+      gameClock.year++;
+    }
+  }
+}
+
+void updateNeeds() {
+  if (screen != HOME && screen != ACTION_SCENE && screen != GAME_MENU && screen != GAME_PLAY) return;
+  if (pet.sleeping) {
+    pet.energy = clampStat(pet.energy + 8);
+    spendFood(2);
+    spendWater(waterDrainPerNeedsTick());
+  } else {
+    spendFood(4);
+    spendWater(waterDrainPerNeedsTick());
+    bool emptyNeed = pet.food == 0 || pet.water == 0;
+    pet.happy = emptyNeed ? 0 : clampStat(pet.happy - 3);
+    spendEnergy(emptyNeed ? 6 : 3);
+  }
+  updateEmptyNeedSurvival();
+  if (pet.health == 0) {
+    enterHospital();
+    return;
+  }
+  bool statusAlert = false;
+  if (random(0, 5) == 0 && pet.poop < 3) {
+    pet.poop++;
+    statusAlert = true;
+  }
+  if (random(0, 8) == 0 && addDirt(RANDOM_DIRT_GAIN)) statusAlert = true;
+  byte virusRisk = virusRiskScore();
+  if (virusRisk > 0 && random(0, 10) < virusRisk) {
+    bool wasSick = pet.sick;
+    byte previousVirusLevel = virusLevel;
+    pet.sick = true;
+    if (virusLevel < MAX_VIRUS_LEVEL) virusLevel++;
+    if (!wasSick || virusLevel > previousVirusLevel) statusAlert = true;
+  }
+  if (pet.sick) pet.health = clampStat(pet.health - 5);
+  tickRecoveryBonus();
+  if (pet.health == 0) {
+    enterHospital();
+    return;
+  }
+  updateHappinessPressure(pet.food == 0 || pet.water == 0);
+  if (updateLowStatusAlerts(false)) statusAlert = true;
+  if (statusAlert) badStatusTune();
+  saveGame(HOME);
+  displayDirty = true;
+}
+
+void rewardMiniGame(bool won) {
+  miniGameWon = won;
+  miniGamePhase = MINI_GAME_RESULT;
+  resetAttentionTimer();
+  gainHappiness(won ? 20 : 5);
+  spendFood(PLAY_FOOD_COST);
+  spendEnergy(8);
+  if (updateLowStatusAlerts(false)) badStatusTune();
+  else if (won) lifeUpTune();
+  else chirp(300, 160);
+  saveGame(HOME);
+  displayDirty = true;
+}
+
+void startMiniGame(byte choice) {
+  activeGame = (MiniGame)choice;
+  miniGamePhase = MINI_GAME_PICK;
+  miniGameWon = false;
+  shellPick = 1;
+  shellAnswer = random(0, 3);
+  coinAnswer = random(0, 2);
+  gameCurrentNumber = random(1, 10);
+  do {
+    gameNextNumber = random(1, 10);
+  } while (gameNextNumber == gameCurrentNumber);
+  screen = GAME_PLAY;
+  displayDirty = true;
+}
+
+void resolveHigherLower(bool guessedHigher) {
+  if (miniGamePhase != MINI_GAME_PICK) return;
+  rewardMiniGame(guessedHigher ? gameNextNumber > gameCurrentNumber : gameNextNumber < gameCurrentNumber);
+}
+
+void resolveCoinToss(byte guess) {
+  if (miniGamePhase != MINI_GAME_PICK) return;
+  rewardMiniGame(guess == coinAnswer);
+}
+
+void resolveShellGame() {
+  if (miniGamePhase != MINI_GAME_PICK) return;
+  rewardMiniGame(shellPick == shellAnswer);
+}
+
+void exitMiniGame() {
+  screen = HOME;
+  saveGame(HOME);
+  displayDirty = true;
+}
+
+void performAction(Action action) {
+  if (action == PLAY) {
+    resetWorkShortcut();
+    gameChoice = 0;
+    screen = GAME_MENU;
+    displayDirty = true;
+    return;
+  }
+  if (action == SETTINGS) {
+    resetWorkShortcut();
+    editField = 0;
+    screen = OPTIONS;
+    displayDirty = true;
+    return;
+  }
+
+  sceneAction = action;
+  screen = ACTION_SCENE;
+  bool statusAlert = false;
+  switch (action) {
+    case FEED: statusAlert = restoreFood(FEED_FOOD_RESTORE); break;
+    case WATER:
+      {
+        byte before = pet.water;
+        pet.water = clampStat(pet.water + 30);
+        if (pet.water > before) statusAlert = addDirt(WATER_DIRT_GAIN);
+      }
+      if (pet.water > 0) waterEmptyTicks = 0;
+      waterDepleteRemainder = 0;
+      applyEmptyNeedMood();
+      break;
+    case SLEEP:
+      if (forcedSleepMinutesLeft == 0) pet.sleeping = !pet.sleeping;
+      else pet.sleeping = true;
+      pet.energy = clampStat(pet.energy + 8);
+      break;
+    case OVERNIGHT: pet.sleeping = true; pet.energy = 100; makeVeryHungry(); break;
+    case CLEAN:
+      {
+        bool hadPoop = pet.poop > 0;
+        pet.poop = 0;
+        if (hadPoop) statusAlert = addDirt(CLEAN_POOP_DIRT_GAIN);
+        gainHappiness(5);
+        spendWater(CLEAN_WATER_COST);
+        spendEnergy(CLEAN_ENERGY_COST);
+      }
+      break;
+    case MEDICINE: pet.sick = false; virusLevel = 0; pet.health = clampStat(pet.health + 35); reduceDirt(MEDICINE_DIRT_REDUCTION); spendWater(MEDICINE_WATER_COST); break;
+    case LEARN: pet.learning = clampStat(pet.learning + 15); gainHappiness(5); spendEnergy(LEARN_ENERGY_COST); break;
+    case PET_ACTION: resetAttentionTimer(); gainHappiness(15); spendFood(PET_FOOD_COST); break;
+    case GROOM: pet.dirty = 0; startRecoveryBonus(); gainHappiness(10); break;
+    case WASH: pet.dirty = 0; startRecoveryBonus(); pet.health = clampStat(pet.health + 5); spendFood(BATH_FOOD_COST); spendEnergy(BATH_ENERGY_COST); break;
+    default: break;
+  }
+  saveGame(HOME);
+  if (updateLowStatusAlerts(false)) statusAlert = true;
+  if (action == OVERNIGHT) {
+    deepSleepTune();
+    if (statusAlert) badStatusTune();
+  } else if (statusAlert) {
+    badStatusTune();
+  } else {
+    coinTune();
+  }
+  animateAction(action);
+}
+
+bool handleWorkShortcut(bool left, bool select, bool right) {
+  if (select || (left && right)) {
+    resetWorkShortcut();
+    return false;
+  }
+  if (right) {
+    if (workShortcutLeftCount > 0) {
+      workShortcutRightCount = 1;
+      workShortcutLeftCount = 0;
+    } else if (workShortcutRightCount < WORK_SHORTCUT_PRESSES) {
+      workShortcutRightCount++;
+    }
+    return false;
+  }
+  if (left) {
+    if (workShortcutRightCount >= WORK_SHORTCUT_PRESSES) {
+      workShortcutLeftCount++;
+      if (workShortcutLeftCount >= WORK_SHORTCUT_PRESSES) {
+        enterGrownUpScreen();
+        return true;
+      }
+    } else {
+      resetWorkShortcut();
+    }
+  }
+  return false;
+}
+
+void enterDebugStatsScreen() {
+  resetDebugShortcut();
+  resetTestShortcut();
+  resetWorkShortcut();
+  screen = DEBUG_STATS;
+  displayDirty = true;
+}
+
+bool handleDebugShortcut(bool left, bool select, bool right) {
+  if (select || (left && right)) {
+    resetDebugShortcut();
+    return false;
+  }
+
+  if (left) {
+    if (debugShortcutRightCount > 0) {
+      debugShortcutLeftCount = 1;
+      debugShortcutRightCount = 0;
+    } else if (debugShortcutLeftCount < DEBUG_SHORTCUT_PRESSES) {
+      debugShortcutLeftCount++;
+    }
+    return false;
+  }
+
+  if (right) {
+    if (debugShortcutLeftCount >= DEBUG_SHORTCUT_PRESSES) {
+      if (debugShortcutRightCount < DEBUG_SHORTCUT_PRESSES) debugShortcutRightCount++;
+      if (debugShortcutRightCount >= DEBUG_SHORTCUT_PRESSES) {
+        enterDebugStatsScreen();
+        return true;
+      }
+    } else {
+      resetDebugShortcut();
+    }
+  }
+
+  return false;
+}
+
+void showAllStatusOverlays() {
+  pet.poop = 3;
+  pet.dirty = DIRTY_FULL_THRESHOLD;
+  pet.sick = true;
+  virusLevel = MAX_VIRUS_LEVEL;
+  pet.health = max(pet.health, (byte)HOSPITAL_RECOVER_HEALTH);
+  if (pet.happy > DIRTY_FULL_HAPPY_LIMIT) pet.happy = DIRTY_FULL_HAPPY_LIMIT;
+  applyEmptyNeedMood();
+  screen = HOME;
+  saveGame(HOME);
+  displayDirty = true;
+  badStatusTune();
+}
+
+bool handleTestShortcut(bool left, bool select, bool right) {
+  if (select || (left && right)) {
+    resetTestShortcut();
+    return false;
+  }
+
+  if (right) {
+    testShortcutLeftCount = 0;
+    if (testShortcutRightCount < TEST_SHORTCUT_PRESSES) testShortcutRightCount++;
+    if (testShortcutRightCount >= TEST_SHORTCUT_PRESSES) {
+      resetTestShortcut();
+      if (screen == HOSPITAL) {
+        hospitalMinutesLeft = 1;
+        saveGame(HOSPITAL);
+        displayDirty = true;
+      } else if (screen == HOME) {
+        enterHospital();
+      }
+      return true;
+    }
+  } else if (left) {
+    testShortcutRightCount = 0;
+    if (screen == HOME) {
+      if (testShortcutLeftCount < TEST_SHORTCUT_PRESSES) testShortcutLeftCount++;
+      if (testShortcutLeftCount >= TEST_SHORTCUT_PRESSES) {
+        resetTestShortcut();
+        showAllStatusOverlays();
+        return true;
+      }
+    } else {
+      testShortcutLeftCount = 0;
+    }
+  }
+
+  return false;
+}
+
+void changeSetupValue(int direction) {
+  if (screen == LANGUAGE) {
+    languageChoice = (languageChoice + 3 + direction) % 3;
+  } else if (screen == SET_CLOCK) {
+    if (editField == 0) gameClock.hour = (gameClock.hour + 24 + direction) % 24;
+    else gameClock.minute = (gameClock.minute + 60 + direction) % 60;
+  } else if (screen == SELECT_ANIMAL) {
+    animalChoice = (animalChoice + ANIMAL_COUNT + direction) % ANIMAL_COUNT;
+  }
+  displayDirty = true;
+}
+
+void handleButtons(bool left, bool select, bool right) {
+  if (left || select || right) resetAwayHungerTimer();
+  if (screen != HOME && (left || select || right)) resetWorkShortcut();
+  if (screen == LOVE_MESSAGE) {
+    if (left || select || right) dismissLoveMessage();
+    return;
+  }
+  if (screen == DEBUG_STATS) {
+    if (left || select || right) {
+      screen = HOME;
+      displayDirty = true;
+    }
+    return;
+  }
+  if (screen == LANGUAGE) {
+    if (left) changeSetupValue(-1);
+    if (right) changeSetupValue(1);
+    if (select) {
+      screen = SET_CLOCK;
+      editField = 0;
+      setupCreatesEgg = true;
+      displayDirty = true;
+    }
+    return;
+  }
+  if (screen == SET_CLOCK || screen == SELECT_ANIMAL) {
+    if (left) changeSetupValue(-1);
+    if (right) changeSetupValue(1);
+    if (select) {
+      editField++;
+      if (screen == SET_CLOCK && editField > 1) {
+        screen = setupCreatesEgg ? SELECT_ANIMAL : HOME;
+        editField = 0;
+        if (!setupCreatesEgg) saveGame(HOME);
+      }
+      else if (screen == SELECT_ANIMAL) { animal = (Animal)animalChoice; startEgg(); }
+      displayDirty = true;
+    }
+    return;
+  }
+  if (screen == GROWN_UP) {
+    if (select) {
+      setupCreatesEgg = true;
+      animalChoice = animal;
+      editField = 0;
+      screen = SELECT_ANIMAL;
+      displayDirty = true;
+    }
+    return;
+  }
+  if (screen == HOSPITAL) {
+    if (handleTestShortcut(left, select, right)) return;
+    return;
+  }
+  if (screen == EGG) {
+    if (select) {
+      unsigned long now = millis();
+      if (now - lastEggSelect > 700) eggSelectCount = 0;
+      lastEggSelect = now;
+      eggSelectCount++;
+      if (eggSelectCount >= 3) {
+        eggSelectCount = 0;
+        hatchMinutesLeft = 0;
+        animateEggHatch();
+        return;
+      }
+    }
+    return;
+  }
+  if (screen == HOME) {
+    if (handleDebugShortcut(left, select, right)) return;
+    if (handleTestShortcut(left, select, right)) return;
+    if (handleWorkShortcut(left, select, right)) return;
+    if (left) selectedAction = (Action)((selectedAction + SETTINGS - 1) % SETTINGS);
+    if (right) selectedAction = (Action)((selectedAction + 1) % SETTINGS);
+    if (select) performAction(selectedAction);
+    if (left || right) { chirp(900, 25); displayDirty = true; }
+  } else if (screen == ACTION_SCENE && select) {
+    screen = HOME;
+    displayDirty = true;
+  } else if (screen == GAME_MENU) {
+    if (left) { gameChoice = (gameChoice + MINI_GAME_COUNT - 1) % MINI_GAME_COUNT; displayDirty = true; }
+    if (right) { gameChoice = (gameChoice + 1) % MINI_GAME_COUNT; displayDirty = true; }
+    if (select) {
+      startMiniGame(gameChoice);
+    }
+  } else if (screen == GAME_PLAY) {
+    if (activeGame == GAME_HIGH_LOW && miniGamePhase == MINI_GAME_PICK) {
+      if (left) resolveHigherLower(false);
+      if (right) resolveHigherLower(true);
+    } else if (activeGame == GAME_COIN_TOSS && miniGamePhase == MINI_GAME_PICK) {
+      if (left) resolveCoinToss(0);
+      if (right) resolveCoinToss(1);
+    } else if (activeGame == GAME_SHELL && miniGamePhase == MINI_GAME_PICK) {
+      if (left) { shellPick = (shellPick + 2) % 3; displayDirty = true; }
+      if (right) { shellPick = (shellPick + 1) % 3; displayDirty = true; }
+    }
+    if (select) {
+      if (activeGame == GAME_SHELL && miniGamePhase == MINI_GAME_PICK) resolveShellGame();
+      else exitMiniGame();
+    }
+  } else if (screen == OPTIONS) {
+    if (left || right) {
+      editField = !editField;
+      displayDirty = true;
+    }
+    if (select) {
+      setupCreatesEgg = editField == 1;
+      if (editField == 0) { screen = SET_CLOCK; editField = 0; }
+      else { screen = SELECT_ANIMAL; animalChoice = animal; }
+      displayDirty = true;
+    }
+  }
+}
+
+void setup() {
+  pinMode(LEFT_PIN, INPUT_PULLUP);
+  pinMode(SELECT_PIN, INPUT_PULLUP);
+  pinMode(RIGHT_PIN, INPUT_PULLUP);
+  pinMode(MUTE_PIN, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
+  platformHardwareInit();
+  Serial.begin(9600);
+  Serial.println(F("Tamagotchi nRF52840 e-paper boot"));
+  randomSeed(analogRead(A0));
+#if defined(ESP32) || defined(ARDUINO_ARCH_NRF52)
+  EEPROM.begin(EEPROM_STORAGE_BYTES);
+#endif
+  display.init(115200);
+  display.setRotation(0);
+  u8g2Text.begin(display);
+  if (!loadGame()) {
+    screen = LANGUAGE;
+    editField = 0;
+    setupCreatesEgg = true;
+  }
+  unsigned long bootNow = millis();
+  lastClockTick = bootNow;
+  lastNeedsTick = bootNow;
+  lastEggFrame = bootNow;
+  lastIdleAnimation = bootNow;
+  lastLowStatusFlash = bootNow;
+  lastUserActivity = bootNow;
+  lowStatusAlertMask = currentLowStatusMask();
+  lowStatusFlashOn = false;
+  lowPowerCycleSaved = false;
+  startupShortcutArmed = true;
+  startupSelectHeldSince = 0;
+  eggSelectCount = 0;
+  refreshDisplay();
+}
+
+void loop() {
+  unsigned long now = millis();
+  if (anyButtonHeld()) markUserActivity(now);
+
+  if (startupShortcutArmed && (screen == LANGUAGE || screen == SET_CLOCK)) {
+    if (digitalRead(SELECT_PIN) == LOW) {
+      if (startupSelectHeldSince == 0) startupSelectHeldSince = now;
+      if (now - startupSelectHeldSince >= 1000UL) {
+        startupShortcutArmed = false;
+        startupSelectHeldSince = 0;
+        animalChoice = animal;
+        editField = 0;
+        screen = SELECT_ANIMAL;
+        displayDirty = true;
+        refreshDisplay();
+        return;
+      }
+      return;
+    } else if (startupSelectHeldSince != 0) {
+      startupShortcutArmed = false;
+      startupSelectHeldSince = 0;
+      handleButtons(false, true, false);
+      return;
+    }
+  }
+
+  bool left = pressed(leftButton);
+  bool select = pressed(selectButton);
+  bool right = pressed(rightButton);
+  bool mute = pressed(muteButton);
+  if (mute) {
+    resetAwayHungerTimer();
+    if (screen == LOVE_MESSAGE) dismissLoveMessage();
+    toggleSoundMute();
+  }
+  if (left || select || right) handleButtons(left, select, right);
+  if (left || select || right || mute) markUserActivity(millis());
+
+  now = millis();
+  while (now - lastClockTick >= CLOCK_TICK_MS) {
+    lastClockTick += CLOCK_TICK_MS;
+    advanceClock();
+    if (screen == EGG && hatchMinutesLeft > 0) hatchMinutesLeft--;
+    if (screen == EGG && hatchMinutesLeft == 0) animateEggHatch();
+    checkAgeLimit();
+    if (gameClock.minute == 0) saveGame(currentSaveStage());
+    if (screen == HOSPITAL) displayDirty = true;
+  }
+  if (now - lastNeedsTick >= NEEDS_TICK_MS) {
+    lastNeedsTick = now;
+    updateNeeds();
+  }
+  if (screen == EGG && now - lastEggFrame >= EGG_FRAME_MS) {
+    lastEggFrame = now;
+    eggFrame = (eggFrame + 1) % 3;
+    displayDirty = true;
+  }
+  updateLoveMessage(now);
+  checkLoveMessageTrigger();
+  updateIdleAnimation(now);
+  updateLowStatusFlash(now);
+  if (displayDirty) refreshDisplay();
+  enterLowPowerCycle(millis());
+}
