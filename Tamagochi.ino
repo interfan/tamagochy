@@ -15,12 +15,17 @@
 #include <EEPROM.h>
 #include <U8g2_for_Adafruit_GFX.h>
 #include "companion_bitmaps.h"
+#include "animal_idle_variants.h"
 #include "action_icons.h"
 #include "status_bitmaps.h"
 #include "species_action_bitmaps.h"
 #ifdef WOKWI_SIM
 #include <SPI.h>
 #include <Adafruit_ILI9341.h>
+#if defined(ESP32)
+#include <driver/gpio.h>
+#include <esp_sleep.h>
+#endif
 #else
 #include <GxEPD2_BW.h>
 #endif
@@ -61,6 +66,8 @@ const unsigned long DEBOUNCE_MS = 35;
 const unsigned long CLOCK_TICK_MS = 60000UL;
 const unsigned long NEEDS_TICK_MS = 20UL * 60000UL;
 const unsigned long EGG_FRAME_MS = 15UL * 60000UL;
+const unsigned long IDLE_ANIMATION_MS = 6000UL;
+const byte IDLE_ANIMATION_FRAMES = 4;
 const uint32_t SAVE_MAGIC = 0x54414D41UL;
 const byte SAVE_VERSION = 11;
 const unsigned int PET_ADULT_DAYS = 30;
@@ -116,6 +123,8 @@ const byte CLEAN_ENERGY_COST = 3;
 const byte LEARN_ENERGY_COST = 3;
 const byte BATH_ENERGY_COST = 4;
 const unsigned long LOVE_MESSAGE_MS = 60UL * 1000UL;
+const unsigned long ACTIVE_WINDOW_MS = 60UL * 1000UL;
+const unsigned long LOW_POWER_WAKE_MS = 60UL * 1000UL;
 
 #ifdef WOKWI_SIM
 #define GxEPD_BLACK ILI9341_BLACK
@@ -244,6 +253,8 @@ unsigned int hatchMinutesLeft = 0;
 unsigned long lastClockTick = 0;
 unsigned long lastNeedsTick = 0;
 unsigned long lastEggFrame = 0;
+unsigned long lastIdleAnimation = 0;
+byte idleAnimationFrame = 0;
 unsigned int forcedSleepMinutesLeft = 0;
 unsigned int awayHungerMinutes = 0;
 byte waterDepleteRemainder = 0;
@@ -270,6 +281,8 @@ byte workShortcutRightCount = 0;
 byte workShortcutLeftCount = 0;
 byte testShortcutRightCount = 0;
 byte testShortcutLeftCount = 0;
+unsigned long lastUserActivity = 0;
+bool lowPowerCycleSaved = false;
 
 byte clampStat(int value) {
   return constrain(value, 0, 100);
@@ -364,7 +377,69 @@ bool updateLowStatusAlerts(bool playSound) {
   return newLow != 0;
 }
 
+bool anyButtonHeld() {
+  return digitalRead(LEFT_PIN) == LOW ||
+         digitalRead(SELECT_PIN) == LOW ||
+         digitalRead(RIGHT_PIN) == LOW ||
+         digitalRead(MUTE_PIN) == LOW;
+}
+
+bool activeWindowOpen(unsigned long now) {
+  return now - lastUserActivity < ACTIVE_WINDOW_MS;
+}
+
+void markUserActivity(unsigned long now) {
+  lastUserActivity = now;
+  lowPowerCycleSaved = false;
+}
+
+bool shouldSaveBeforeLowPower() {
+  return screen == EGG || screen == HOME || screen == GROWN_UP || screen == HOSPITAL;
+}
+
+void platformLowPowerSleep() {
+#if defined(WOKWI_SIM) && defined(ESP32)
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  esp_sleep_enable_timer_wakeup((uint64_t)LOW_POWER_WAKE_MS * 1000ULL);
+  gpio_wakeup_enable((gpio_num_t)LEFT_PIN, GPIO_INTR_LOW_LEVEL);
+  gpio_wakeup_enable((gpio_num_t)SELECT_PIN, GPIO_INTR_LOW_LEVEL);
+  gpio_wakeup_enable((gpio_num_t)RIGHT_PIN, GPIO_INTR_LOW_LEVEL);
+  gpio_wakeup_enable((gpio_num_t)MUTE_PIN, GPIO_INTR_LOW_LEVEL);
+  esp_sleep_enable_gpio_wakeup();
+  esp_light_sleep_start();
+  gpio_wakeup_disable((gpio_num_t)LEFT_PIN);
+  gpio_wakeup_disable((gpio_num_t)SELECT_PIN);
+  gpio_wakeup_disable((gpio_num_t)RIGHT_PIN);
+  gpio_wakeup_disable((gpio_num_t)MUTE_PIN);
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+#endif
+}
+
+void enterLowPowerCycle(unsigned long now) {
+  if (activeWindowOpen(now) || displayDirty || screen == ACTION_SCENE || screen == HATCHING) return;
+
+  if (!lowPowerCycleSaved && shouldSaveBeforeLowPower()) {
+    saveGame(currentSaveStage());
+    lowPowerCycleSaved = true;
+  }
+
+  display.hibernate();
+  platformLowPowerSleep();
+  unsigned long wokeAt = millis();
+  lastLowStatusFlash = wokeAt;
+  if (anyButtonHeld()) markUserActivity(wokeAt);
+}
+
 void updateLowStatusFlash(unsigned long now) {
+  if (!activeWindowOpen(now)) {
+    if (lowStatusFlashOn) {
+      lowStatusFlashOn = false;
+      if (screen == HOME) displayDirty = true;
+    }
+    lastLowStatusFlash = now;
+    return;
+  }
+
   if (screen != HOME || currentLowStatusMask() == 0) {
     if (lowStatusFlashOn) {
       lowStatusFlashOn = false;
@@ -1183,6 +1258,28 @@ int animalDisplayScale(Animal kind) {
   return 100;
 }
 
+void animalIdleFrameInfo(Animal kind, byte frame, FlashAddress &bitmap, byte &width, byte &height) {
+  animalBitmapInfo(kind, bitmap, width, height);
+  byte variant = frame % IDLE_ANIMATION_FRAMES;
+  if (variant == 0) return;
+#define SET_IDLE_VARIANT(PREFIX) \
+  bitmap = variant == 1 ? FLASH_ADDRESS(PREFIX##_IDLE_WINK_BITMAP) : \
+           variant == 2 ? FLASH_ADDRESS(PREFIX##_IDLE_SPARKLE_BITMAP) : FLASH_ADDRESS(PREFIX##_IDLE_PERK_BITMAP)
+  switch (kind) {
+    case CAT: SET_IDLE_VARIANT(CAT); break;
+    case DOG: SET_IDLE_VARIANT(DOG); break;
+    case BUNNY: SET_IDLE_VARIANT(BUNNY); break;
+    case PANDA: SET_IDLE_VARIANT(PANDA); break;
+    case DRAGON: SET_IDLE_VARIANT(DRAGON); break;
+    case FOX: SET_IDLE_VARIANT(FOX); break;
+    case PIG: SET_IDLE_VARIANT(PIG); break;
+    case HAMSTER: SET_IDLE_VARIANT(HAMSTER); break;
+    case PENGUIN: SET_IDLE_VARIANT(PENGUIN); break;
+    default: break;
+  }
+#undef SET_IDLE_VARIANT
+}
+
 void drawAnimalScaled(int x, int y, Animal kind, byte pose, int scalePercent) {
   int bounce = pose % 2 ? -3 : 0;
   FlashAddress bitmap;
@@ -1196,16 +1293,14 @@ void drawAnimalScaled(int x, int y, Animal kind, byte pose, int scalePercent) {
 }
 
 void drawAnimal(int x, int y, Animal kind, byte pose) {
-  int bounce = pose % 2 ? -3 : 0;
-  int top = y + bounce;
   FlashAddress bitmap;
   byte width;
   byte height;
-  animalPoseBitmapInfo(kind, POSE_IDLE, bitmap, width, height);
+  animalIdleFrameInfo(kind, pose, bitmap, width, height);
   int scalePercent = animalDisplayScale(kind);
   int scaledWidth = width * scalePercent / 100;
   int scaledHeight = height * scalePercent / 100;
-  drawScaledBitmap(x - scaledWidth / 2, top - scaledHeight / 2, bitmap, width, height, scalePercent);
+  drawScaledBitmap(x - scaledWidth / 2, y - scaledHeight / 2, bitmap, width, height, scalePercent);
 }
 
 void drawActionIcon(Action action, int x, int y, bool selected) {
@@ -1243,7 +1338,7 @@ void drawHome() {
   drawMeter(5, 22, 90, 1, pet.water);
   drawMeter(105, 8, 90, 2, pet.happy);
   drawMeter(105, 22, 90, 3, pet.energy);
-  drawAnimal(100, 88, animal, gameClock.minute);
+  drawAnimal(100, 88, animal, idleAnimationFrame);
   if (pet.poop) drawPoopOverlay();
   if (pet.sick) drawVirusOverlay();
   if (petIsDirty()) drawDirtOverlay();
@@ -1661,6 +1756,27 @@ void updateLoveMessage(unsigned long now) {
   if (screen == LOVE_MESSAGE && now - loveMessageStarted >= LOVE_MESSAGE_MS) dismissLoveMessage();
 }
 
+void updateIdleAnimation(unsigned long now) {
+  if (screen != HOME) {
+    idleAnimationFrame = 0;
+    lastIdleAnimation = now;
+    return;
+  }
+  if (!activeWindowOpen(now)) {
+    if (idleAnimationFrame != 0) {
+      idleAnimationFrame = 0;
+      displayDirty = true;
+    }
+    lastIdleAnimation = now;
+    return;
+  }
+  if (now - lastIdleAnimation >= IDLE_ANIMATION_MS) {
+    lastIdleAnimation = now;
+    idleAnimationFrame = (idleAnimationFrame + 1) % IDLE_ANIMATION_FRAMES;
+    displayDirty = true;
+  }
+}
+
 void applyEmptyNeedMood() {
   if (pet.food == 0 || pet.water == 0) pet.happy = 0;
 }
@@ -1923,6 +2039,7 @@ void advanceClock() {
         makeVeryHungry();
         updateLowStatusAlerts(true);
         saveGame(HOME);
+        displayDirty = true;
       }
     }
   }
@@ -2326,12 +2443,16 @@ void setup() {
     editField = 0;
     setupCreatesEgg = true;
   }
-  lastClockTick = millis();
-  lastNeedsTick = millis();
-  lastEggFrame = millis();
-  lastLowStatusFlash = millis();
+  unsigned long bootNow = millis();
+  lastClockTick = bootNow;
+  lastNeedsTick = bootNow;
+  lastEggFrame = bootNow;
+  lastIdleAnimation = bootNow;
+  lastLowStatusFlash = bootNow;
+  lastUserActivity = bootNow;
   lowStatusAlertMask = currentLowStatusMask();
   lowStatusFlashOn = false;
+  lowPowerCycleSaved = false;
   startupShortcutArmed = true;
   startupSelectHeldSince = 0;
   eggSelectCount = 0;
@@ -2339,10 +2460,13 @@ void setup() {
 }
 
 void loop() {
+  unsigned long now = millis();
+  if (anyButtonHeld()) markUserActivity(now);
+
   if (startupShortcutArmed && (screen == LANGUAGE || screen == SET_CLOCK)) {
     if (digitalRead(SELECT_PIN) == LOW) {
-      if (startupSelectHeldSince == 0) startupSelectHeldSince = millis();
-      if (millis() - startupSelectHeldSince >= 1000UL) {
+      if (startupSelectHeldSince == 0) startupSelectHeldSince = now;
+      if (now - startupSelectHeldSince >= 1000UL) {
         startupShortcutArmed = false;
         startupSelectHeldSince = 0;
         animalChoice = animal;
@@ -2371,8 +2495,9 @@ void loop() {
     toggleSoundMute();
   }
   if (left || select || right) handleButtons(left, select, right);
+  if (left || select || right || mute) markUserActivity(millis());
 
-  unsigned long now = millis();
+  now = millis();
   while (now - lastClockTick >= CLOCK_TICK_MS) {
     lastClockTick += CLOCK_TICK_MS;
     advanceClock();
@@ -2380,7 +2505,7 @@ void loop() {
     if (screen == EGG && hatchMinutesLeft == 0) animateEggHatch();
     checkAgeLimit();
     if (gameClock.minute == 0) saveGame(currentSaveStage());
-    displayDirty = true;
+    if (screen == HOSPITAL) displayDirty = true;
   }
   if (now - lastNeedsTick >= NEEDS_TICK_MS) {
     lastNeedsTick = now;
@@ -2393,6 +2518,8 @@ void loop() {
   }
   updateLoveMessage(now);
   checkLoveMessageTrigger();
+  updateIdleAnimation(now);
   updateLowStatusFlash(now);
   if (displayDirty) refreshDisplay();
+  enterLowPowerCycle(millis());
 }

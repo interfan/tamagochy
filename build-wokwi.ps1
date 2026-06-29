@@ -43,6 +43,7 @@ try {
   New-Item -ItemType Directory -Force -Path $sketchPath | Out-Null
   Copy-Item (Join-Path $projectRoot "Tamagochi.ino") $sketchPath -Force
   Copy-Item (Join-Path $projectRoot "companion_bitmaps.h") $sketchPath -Force
+  Copy-Item (Join-Path $projectRoot "animal_idle_variants.h") $sketchPath -Force
   Copy-Item (Join-Path $projectRoot "action_icons.h") $sketchPath -Force
   Copy-Item (Join-Path $projectRoot "status_bitmaps.h") $sketchPath -Force
   Copy-Item (Join-Path $projectRoot "species_action_bitmaps.h") $sketchPath -Force
@@ -82,7 +83,7 @@ try {
   $flashRemaining = $nrfFlashBudget - $flashUsed
   $percentUsed = [math]::Round(($flashUsed * 100.0) / $nrfFlashBudget, 1)
   $bitmapBytes = 0
-  foreach ($bitmapHeader in @("companion_bitmaps.h", "action_icons.h", "status_bitmaps.h", "species_action_bitmaps.h")) {
+  foreach ($bitmapHeader in @("companion_bitmaps.h", "animal_idle_variants.h", "action_icons.h", "status_bitmaps.h", "species_action_bitmaps.h")) {
     $bitmapText = Get-Content (Join-Path $projectRoot $bitmapHeader) -Raw
     $bitmapBytes += [regex]::Matches($bitmapText, "\b0x[0-9A-Fa-f]{2}\b").Count
   }
