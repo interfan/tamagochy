@@ -22,6 +22,28 @@ function Find-ArduinoCli {
   return $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 }
 
+function Find-Python3 {
+  $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+  if ($pyLauncher) {
+    & $pyLauncher.Source -3 --version | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      return [PSCustomObject]@{ Exe = $pyLauncher.Source; Args = @("-3") }
+    }
+  }
+
+  foreach ($candidate in @("python3", "python")) {
+    $pathCommand = Get-Command $candidate -ErrorAction SilentlyContinue
+    if ($pathCommand) {
+      $versionText = (& $pathCommand.Source --version 2>&1 | Out-String).Trim()
+      if ($LASTEXITCODE -eq 0 -and $versionText -match "^Python 3\.") {
+        return [PSCustomObject]@{ Exe = $pathCommand.Source; Args = @() }
+      }
+    }
+  }
+
+  throw "Python 3 was not found. Install Python 3 or the Windows py launcher to run bitmap validation."
+}
+
 $cli = Find-ArduinoCli
 if (-not $cli) {
   throw @"
@@ -40,6 +62,12 @@ $nrfFlashBudget = 1MB
 
 Push-Location $projectRoot
 try {
+  $python = Find-Python3
+  & $python.Exe @($python.Args) (Join-Path $projectRoot "tools\check_bitmaps.py")
+  if ($LASTEXITCODE -ne 0) {
+    throw "Bitmap validation failed."
+  }
+
   New-Item -ItemType Directory -Force -Path $sketchPath | Out-Null
   Copy-Item (Join-Path $projectRoot "Tamagochi.ino") $sketchPath -Force
   Copy-Item (Join-Path $projectRoot "companion_bitmaps.h") $sketchPath -Force

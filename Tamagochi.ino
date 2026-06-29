@@ -69,10 +69,15 @@ const unsigned long EGG_FRAME_MS = 15UL * 60000UL;
 const unsigned long IDLE_ANIMATION_MS = 6000UL;
 const byte IDLE_ANIMATION_FRAMES = 4;
 const uint32_t SAVE_MAGIC = 0x54414D41UL;
+const uint32_t SAVE_RECORD_MAGIC = 0x53564132UL;
 const byte SAVE_VERSION = 11;
-const unsigned int PET_ADULT_DAYS = 30;
+const byte SAVE_SLOT_COUNT = 2;
+const size_t EEPROM_STORAGE_BYTES = 512;
+const size_t SAVE_SLOT_BYTES = EEPROM_STORAGE_BYTES / SAVE_SLOT_COUNT;
+const unsigned int PET_ADULT_DAYS = 25;
 const byte WORK_SHORTCUT_PRESSES = 5;
 const byte TEST_SHORTCUT_PRESSES = 10;
+const byte DEBUG_SHORTCUT_PRESSES = 5;
 const unsigned int FORCED_SLEEP_MINUTES = 12U * 60U;
 const unsigned int HOSPITAL_MINUTES = 24U * 60U;
 const unsigned int AWAY_HUNGER_MINUTES = 4U * 60U;
@@ -125,6 +130,11 @@ const byte BATH_ENERGY_COST = 4;
 const unsigned long LOVE_MESSAGE_MS = 60UL * 1000UL;
 const unsigned long ACTIVE_WINDOW_MS = 60UL * 1000UL;
 const unsigned long LOW_POWER_WAKE_MS = 60UL * 1000UL;
+#ifdef WOKWI_SIM
+const bool IDLE_ANIMATION_AUTO_REFRESH = true;
+#else
+const bool IDLE_ANIMATION_AUTO_REFRESH = false;
+#endif
 
 #ifdef WOKWI_SIM
 #define GxEPD_BLACK ILI9341_BLACK
@@ -151,7 +161,7 @@ U8G2_FOR_ADAFRUIT_GFX u8g2Text;
 enum Screen : byte {
   LANGUAGE = 0, SET_CLOCK = 1, SELECT_ANIMAL = 3, EGG = 4, HATCHING = 5,
   HOME = 6, ACTION_SCENE = 7, GAME_MENU = 8, OPTIONS = 9, GAME_PLAY = 10,
-  GROWN_UP = 11, HOSPITAL = 12, LOVE_MESSAGE = 13
+  GROWN_UP = 11, HOSPITAL = 12, LOVE_MESSAGE = 13, DEBUG_STATS = 14
 };
 enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, PIG, HAMSTER, PENGUIN, ANIMAL_COUNT };
 enum AnimalPose : byte { POSE_IDLE, POSE_HAPPY, POSE_SLEEP };
@@ -225,6 +235,13 @@ struct SaveData {
   byte soundMuted;
 };
 
+struct SaveRecord {
+  uint32_t magic;
+  uint32_t sequence;
+  SaveData data;
+  uint32_t crc;
+};
+
 Button leftButton = {LEFT_PIN, HIGH, HIGH, 0};
 Button selectButton = {SELECT_PIN, HIGH, HIGH, 0};
 Button rightButton = {RIGHT_PIN, HIGH, HIGH, 0};
@@ -281,8 +298,12 @@ byte workShortcutRightCount = 0;
 byte workShortcutLeftCount = 0;
 byte testShortcutRightCount = 0;
 byte testShortcutLeftCount = 0;
+byte debugShortcutLeftCount = 0;
+byte debugShortcutRightCount = 0;
 unsigned long lastUserActivity = 0;
 bool lowPowerCycleSaved = false;
+uint32_t saveSequence = 0;
+byte activeSaveSlot = 1;
 
 byte clampStat(int value) {
   return constrain(value, 0, 100);
@@ -492,48 +513,99 @@ byte currentSaveStage() {
   return HOME;
 }
 
-void saveSoundSetting() {
-  SaveData data;
-  EEPROM.get(0, data);
-  if (data.magic != SAVE_MAGIC || !savedStageValid(data.stage)) return;
-  data.version = SAVE_VERSION;
-  data.soundMuted = soundMuted ? 1 : 0;
-  EEPROM.put(0, data);
-#if defined(ESP32)
-  EEPROM.commit();
-#endif
-}
-
-void toggleSoundMute() {
-  soundMuted = !soundMuted;
-  noTone(BUZZER_PIN);
-  saveSoundSetting();
-  if (!soundMuted) unmuteTune();
-}
-
-void saveGame(byte stage) {
-  SaveData data = {
-    SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft,
-    languageChoice, SAVE_VERSION, forcedSleepMinutesLeft, awayHungerMinutes,
-    waterDepleteRemainder, foodEmptyTicks, waterEmptyTicks, attentionTicks,
-    recoveryBonusTicks, hospitalMinutesLeft, virusLevel, soundMuted ? 1 : 0
-  };
-  EEPROM.put(0, data);
-#if defined(ESP32)
-  EEPROM.commit();
-#endif
-}
-
-bool loadGame() {
-  SaveData data;
-  EEPROM.get(0, data);
-  if (data.magic != SAVE_MAGIC || !savedStageValid(data.stage)) {
-    return false;
+uint32_t crc32Bytes(const uint8_t *data, size_t length) {
+  uint32_t crc = 0xFFFFFFFFUL;
+  while (length--) {
+    crc ^= *data++;
+    for (byte i = 0; i < 8; i++) {
+      if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320UL;
+      else crc >>= 1;
+    }
   }
+  return ~crc;
+}
+
+uint32_t saveRecordCrc(const SaveRecord &record) {
+  return crc32Bytes(reinterpret_cast<const uint8_t *>(&record),
+                    sizeof(SaveRecord) - sizeof(record.crc));
+}
+
+int saveSlotAddress(byte slot) {
+  return slot * SAVE_SLOT_BYTES;
+}
+
+bool saveDataHeaderValid(const SaveData &data) {
+  return data.magic == SAVE_MAGIC && savedStageValid(data.stage);
+}
+
+bool saveRecordValid(const SaveRecord &record) {
+  return record.magic == SAVE_RECORD_MAGIC &&
+         saveDataHeaderValid(record.data) &&
+         record.data.version <= SAVE_VERSION &&
+         saveRecordCrc(record) == record.crc;
+}
+
+bool loadBestSaveData(SaveData &data, bool &legacySave) {
+  SaveRecord slot0;
+  SaveRecord slot1;
+  EEPROM.get(saveSlotAddress(0), slot0);
+  EEPROM.get(saveSlotAddress(1), slot1);
+  bool slot0Valid = saveRecordValid(slot0);
+  bool slot1Valid = saveRecordValid(slot1);
+  legacySave = false;
+
+  if (slot0Valid || slot1Valid) {
+    if (slot1Valid && (!slot0Valid || slot1.sequence > slot0.sequence)) {
+      data = slot1.data;
+      saveSequence = slot1.sequence;
+      activeSaveSlot = 1;
+    } else {
+      data = slot0.data;
+      saveSequence = slot0.sequence;
+      activeSaveSlot = 0;
+    }
+    return true;
+  }
+
+  EEPROM.get(0, data);
+  if (!saveDataHeaderValid(data)) return false;
+  legacySave = true;
+  saveSequence = 0;
+  activeSaveSlot = 1;
+  return true;
+}
+
+bool writeSaveData(const SaveData &data) {
+  if (sizeof(SaveRecord) > SAVE_SLOT_BYTES) return false;
+
+  SaveRecord record;
+  memset(&record, 0, sizeof(record));
+  record.magic = SAVE_RECORD_MAGIC;
+  record.sequence = saveSequence + 1;
+  record.data = data;
+  record.crc = saveRecordCrc(record);
+
+  byte targetSlot = activeSaveSlot == 0 ? 1 : 0;
+  EEPROM.put(saveSlotAddress(targetSlot), record);
+#if defined(ESP32)
+  EEPROM.commit();
+#endif
+
+  SaveRecord verify;
+  EEPROM.get(saveSlotAddress(targetSlot), verify);
+  if (!saveRecordValid(verify)) return false;
+
+  saveSequence = verify.sequence;
+  activeSaveSlot = targetSlot;
+  return true;
+}
+
+bool applyLoadedSaveData(const SaveData &data) {
   gameClock = data.clock;
   pet = data.pet;
   byte saveVersion = data.version <= SAVE_VERSION ? data.version : 0;
   if (saveVersion < 8 && pet.dirty > 0) pet.dirty = DIRTY_VISIBLE_THRESHOLD;
+
   byte savedAnimal = data.animal;
   if (saveVersion < 3) {
     if (savedAnimal == 6) savedAnimal = CAT;
@@ -541,6 +613,7 @@ bool loadGame() {
   }
   if (savedAnimal >= ANIMAL_COUNT) return false;
   animal = (Animal)savedAnimal;
+
   languageChoice = data.language < 3 ? data.language : 0;
   hatchMinutesLeft = data.hatchMinutesLeft;
   forcedSleepMinutesLeft = saveVersion >= 2 &&
@@ -562,8 +635,10 @@ bool loadGame() {
   virusLevel = saveVersion >= 10 && data.virusLevel <= MAX_VIRUS_LEVEL ?
       data.virusLevel : pet.sick ? 1 : 0;
   soundMuted = saveVersion >= 11 ? data.soundMuted != 0 : false;
+
   if (!pet.sick) virusLevel = 0;
   else if (virusLevel == 0) virusLevel = 1;
+
   if (data.stage == EGG) screen = EGG;
   else if (data.stage == HOSPITAL) {
     screen = HOSPITAL;
@@ -571,11 +646,50 @@ bool loadGame() {
   }
   else if (data.stage == GROWN_UP || pet.ageDays >= PET_ADULT_DAYS) screen = GROWN_UP;
   else screen = HOME;
+
   if (screen == EGG || screen == GROWN_UP || screen == HOSPITAL) forcedSleepMinutesLeft = 0;
   else if (forcedSleepMinutesLeft > 0 || pet.energy == 0) {
     if (forcedSleepMinutesLeft == 0) forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
     pet.sleeping = true;
   }
+
+  return true;
+}
+
+void saveSoundSetting() {
+  SaveData data;
+  bool legacySave = false;
+  if (!loadBestSaveData(data, legacySave)) return;
+  data.version = SAVE_VERSION;
+  data.soundMuted = soundMuted ? 1 : 0;
+  writeSaveData(data);
+}
+
+void toggleSoundMute() {
+  soundMuted = !soundMuted;
+  noTone(BUZZER_PIN);
+  saveSoundSetting();
+  if (!soundMuted) unmuteTune();
+}
+
+void saveGame(byte stage) {
+  SaveData data = {
+    SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft,
+    languageChoice, SAVE_VERSION, forcedSleepMinutesLeft, awayHungerMinutes,
+    waterDepleteRemainder, foodEmptyTicks, waterEmptyTicks, attentionTicks,
+    recoveryBonusTicks, hospitalMinutesLeft, virusLevel, soundMuted ? 1 : 0
+  };
+  writeSaveData(data);
+}
+
+bool loadGame() {
+  SaveData data;
+  bool legacySave = false;
+  if (!loadBestSaveData(data, legacySave)) {
+    return false;
+  }
+  if (!applyLoadedSaveData(data)) return false;
+  if (legacySave) saveGame(currentSaveStage());
   return true;
 }
 
@@ -639,7 +753,7 @@ const __FlashStringHelper *uiText(UiText text) {
       case TXT_FOUND_20: return F("GEFUNDEN +20");
       case TXT_EMPTY_5: return F("LEER +5");
       case TXT_GROWN_TITLE: return F("GROSS!");
-      case TXT_GROWN_DAY: return F("TAG 30");
+      case TXT_GROWN_DAY: return F("TAG 25");
       case TXT_GROWN_WORK: return F("ZUR ARBEIT");
       case TXT_HOSPITAL_TITLE: return F("KLINIK");
       case TXT_HOSPITAL_REST: return F("RUHE");
@@ -689,7 +803,7 @@ const __FlashStringHelper *uiText(UiText text) {
     case TXT_FOUND_20: return F("FOUND +20");
     case TXT_EMPTY_5: return F("EMPTY +5");
     case TXT_GROWN_TITLE: return F("GROWN UP!");
-    case TXT_GROWN_DAY: return F("DAY 30");
+    case TXT_GROWN_DAY: return F("DAY 25");
     case TXT_GROWN_WORK: return F("OFF TO WORK");
     case TXT_HOSPITAL_TITLE: return F("HOSPITAL");
     case TXT_HOSPITAL_REST: return F("RESTING");
@@ -741,7 +855,7 @@ const char *bgText(UiText text) {
     case TXT_FOUND_20: return "НАМЕРИ +20";
     case TXT_EMPTY_5: return "ПРАЗНО +5";
     case TXT_GROWN_TITLE: return "ПОРАСНА!";
-    case TXT_GROWN_DAY: return "ДЕН 30";
+    case TXT_GROWN_DAY: return "ДЕН 25";
     case TXT_GROWN_WORK: return "НА РАБОТА";
     case TXT_HOSPITAL_TITLE: return "БОЛНИЦА";
     case TXT_HOSPITAL_REST: return "ПОЧИВКА";
@@ -1410,6 +1524,48 @@ void drawLoveMessageScreen() {
   drawLargeHeart(100, 112);
 }
 
+void drawDebugValue(const char *label, int value, int x, int y) {
+  display.setTextSize(1);
+  display.setCursor(x, y);
+  display.print(label);
+  display.print(':');
+  display.print(value);
+}
+
+void drawDebugFlag(const char *label, bool value, int x, int y) {
+  display.setTextSize(1);
+  display.setCursor(x, y);
+  display.print(label);
+  display.print(':');
+  display.print(value ? 'Y' : 'N');
+}
+
+void drawDebugStatsScreen() {
+  display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
+  display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
+  display.setTextSize(2);
+  display.setCursor(43, 20);
+  display.print(F("DEBUG"));
+  display.drawLine(25, 44, 175, 44, GxEPD_BLACK);
+
+  drawDebugValue("FOOD", pet.food, 18, 56);
+  drawDebugValue("WATR", pet.water, 108, 56);
+  drawDebugValue("HAP", pet.happy, 18, 72);
+  drawDebugValue("ENRG", pet.energy, 108, 72);
+  drawDebugValue("HLTH", pet.health, 18, 88);
+  drawDebugValue("LRN", pet.learning, 108, 88);
+  drawDebugValue("POOP", pet.poop, 18, 104);
+  drawDebugValue("DIRT", pet.dirty, 108, 104);
+  drawDebugValue("VIR", virusLevel, 18, 120);
+  drawDebugValue("AGE", pet.ageDays, 108, 120);
+  drawDebugValue("F0", foodEmptyTicks, 18, 136);
+  drawDebugValue("W0", waterEmptyTicks, 108, 136);
+  drawDebugValue("HOSP", hospitalMinutesLeft, 18, 152);
+  drawDebugValue("SLP", forcedSleepMinutesLeft, 108, 152);
+  drawDebugFlag("SICK", pet.sick, 18, 168);
+  drawDebugFlag("SLEEP", pet.sleeping, 108, 168);
+}
+
 void drawSetupNumber(UiText title, int value) {
   drawSetupFrame();
   drawUiCentered(title, 30, 2);
@@ -1618,6 +1774,7 @@ void refreshDisplay() {
     else if (screen == GROWN_UP) drawGrownUpScreen();
     else if (screen == HOSPITAL) drawHospitalScreen();
     else if (screen == LOVE_MESSAGE) drawLoveMessageScreen();
+    else if (screen == DEBUG_STATS) drawDebugStatsScreen();
   } while (display.nextPage());
   display.hibernate();
   displayDirty = false;
@@ -1679,6 +1836,7 @@ void startEgg() {
   eggFrame = 0;
   workShortcutRightCount = 0;
   workShortcutLeftCount = 0;
+  resetDebugShortcut();
   resetTestShortcut();
   saveGame(EGG);
   happyTune();
@@ -1695,6 +1853,11 @@ void resetTestShortcut() {
   testShortcutLeftCount = 0;
 }
 
+void resetDebugShortcut() {
+  debugShortcutLeftCount = 0;
+  debugShortcutRightCount = 0;
+}
+
 void enterGrownUpScreen() {
   if (pet.ageDays < PET_ADULT_DAYS) pet.ageDays = PET_ADULT_DAYS;
   pet.sleeping = false;
@@ -1707,6 +1870,7 @@ void enterGrownUpScreen() {
   screen = GROWN_UP;
   resetWorkShortcut();
   resetTestShortcut();
+  resetDebugShortcut();
   saveGame(GROWN_UP);
   displayDirty = true;
   grownUpTune();
@@ -1759,6 +1923,14 @@ void updateLoveMessage(unsigned long now) {
 void updateIdleAnimation(unsigned long now) {
   if (screen != HOME) {
     idleAnimationFrame = 0;
+    lastIdleAnimation = now;
+    return;
+  }
+  if (!IDLE_ANIMATION_AUTO_REFRESH) {
+    if (idleAnimationFrame != 0) {
+      idleAnimationFrame = 0;
+      displayDirty = true;
+    }
     lastIdleAnimation = now;
     return;
   }
@@ -2251,6 +2423,45 @@ bool handleWorkShortcut(bool left, bool select, bool right) {
   return false;
 }
 
+void enterDebugStatsScreen() {
+  resetDebugShortcut();
+  resetTestShortcut();
+  resetWorkShortcut();
+  screen = DEBUG_STATS;
+  displayDirty = true;
+}
+
+bool handleDebugShortcut(bool left, bool select, bool right) {
+  if (select || (left && right)) {
+    resetDebugShortcut();
+    return false;
+  }
+
+  if (left) {
+    if (debugShortcutRightCount > 0) {
+      debugShortcutLeftCount = 1;
+      debugShortcutRightCount = 0;
+    } else if (debugShortcutLeftCount < DEBUG_SHORTCUT_PRESSES) {
+      debugShortcutLeftCount++;
+    }
+    return false;
+  }
+
+  if (right) {
+    if (debugShortcutLeftCount >= DEBUG_SHORTCUT_PRESSES) {
+      if (debugShortcutRightCount < DEBUG_SHORTCUT_PRESSES) debugShortcutRightCount++;
+      if (debugShortcutRightCount >= DEBUG_SHORTCUT_PRESSES) {
+        enterDebugStatsScreen();
+        return true;
+      }
+    } else {
+      resetDebugShortcut();
+    }
+  }
+
+  return false;
+}
+
 void showAllStatusOverlays() {
   pet.poop = 3;
   pet.dirty = DIRTY_FULL_THRESHOLD;
@@ -2321,6 +2532,13 @@ void handleButtons(bool left, bool select, bool right) {
     if (left || select || right) dismissLoveMessage();
     return;
   }
+  if (screen == DEBUG_STATS) {
+    if (left || select || right) {
+      screen = HOME;
+      displayDirty = true;
+    }
+    return;
+  }
   if (screen == LANGUAGE) {
     if (left) changeSetupValue(-1);
     if (right) changeSetupValue(1);
@@ -2377,6 +2595,7 @@ void handleButtons(bool left, bool select, bool right) {
     return;
   }
   if (screen == HOME) {
+    if (handleDebugShortcut(left, select, right)) return;
     if (handleTestShortcut(left, select, right)) return;
     if (handleWorkShortcut(left, select, right)) return;
     if (left) selectedAction = (Action)((selectedAction + SETTINGS - 1) % SETTINGS);
@@ -2433,7 +2652,7 @@ void setup() {
 #endif
   randomSeed(analogRead(A0));
 #if defined(ESP32)
-  EEPROM.begin(512);
+  EEPROM.begin(EEPROM_STORAGE_BYTES);
 #endif
   display.init(115200);
   display.setRotation(0);
