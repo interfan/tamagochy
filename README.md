@@ -52,12 +52,14 @@ meaning depending on the screen:
 - **Left:** previous icon or decrease a setup value
 - **Select:** confirm or perform the selected action
 - **Right:** next icon or increase a setup value
+- **Mute:** toggle sounds on or off
 
 | Tactile switch | Mega 2560 pin |
 | --- | --- |
 | Left button | D2 |
 | Select button | D3 |
 | Right button | D4 |
+| Mute button | D5 |
 
 Connect one leg of each switch to its listed pin and the opposite leg to
 `GND`. No button resistors are required because the sketch uses `INPUT_PULLUP`.

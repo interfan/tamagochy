@@ -1,6 +1,7 @@
 from pathlib import Path
+import math
 
-from PIL import Image, ImageEnhance, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "assets" / "status" / "generated-status-sheet.png"
@@ -89,6 +90,42 @@ def prepare_smell(source: Image.Image) -> Image.Image:
     return fit_ink(smell_quad.crop(box), (14, 36), (12, 34))
 
 
+def prepare_love_heart() -> Image.Image:
+    width, height = 84, 72
+    scale = 6
+    large = Image.new("L", (width * scale, height * scale), 255)
+    draw = ImageDraw.Draw(large)
+
+    raw_points = []
+    for degree in range(360):
+        t = math.radians(degree)
+        x = 16 * (math.sin(t) ** 3)
+        y = -(13 * math.cos(t) - 5 * math.cos(2 * t) -
+              2 * math.cos(3 * t) - math.cos(4 * t))
+        raw_points.append((x, y))
+
+    min_x = min(point[0] for point in raw_points)
+    max_x = max(point[0] for point in raw_points)
+    min_y = min(point[1] for point in raw_points)
+    max_y = max(point[1] for point in raw_points)
+    margin_x = 7 * scale
+    margin_y = 2 * scale
+    target_w = (width - 14) * scale
+    target_h = (height - 6) * scale
+    points = [
+        (
+            margin_x + (x - min_x) * target_w / (max_x - min_x),
+            margin_y + (y - min_y) * target_h / (max_y - min_y),
+        )
+        for x, y in raw_points
+    ]
+    draw.polygon(points, fill=0)
+
+    heart = large.resize((width, height), Image.Resampling.LANCZOS)
+    heart = heart.point(lambda value: 0 if value < 230 else 255)
+    return heart
+
+
 def encode_bitmap(image: Image.Image) -> list[int]:
     width, height = image.size
     bytes_per_row = (width + 7) // 8
@@ -139,6 +176,7 @@ def main() -> None:
             spec["max"],
         )
     rendered["SMELL_STATUS"] = prepare_smell(source)
+    rendered["LOVE_HEART"] = prepare_love_heart()
 
     output = [
         "#pragma once",

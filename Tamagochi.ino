@@ -5,6 +5,7 @@
     D2 = LEFT / previous / decrease
     D3 = SELECT / confirm
     D4 = RIGHT / next / increase
+    D5 = MUTE / unmute sounds
 
   The physical build targets the Mega/e-paper wiring below. Wokwi uses a
   standard ESP32 DevKit as a 32-bit preview target for the future nRF52840.
@@ -38,6 +39,7 @@ typedef uintptr_t FlashAddress;
 const byte LEFT_PIN = 25;
 const byte SELECT_PIN = 26;
 const byte RIGHT_PIN = 27;
+const byte MUTE_PIN = 14;
 const byte BUZZER_PIN = 32;
 const byte EPD_CS_PIN = 15;
 const byte EPD_DC_PIN = 2;
@@ -47,6 +49,7 @@ const byte EPD_BUSY_PIN = 33;
 const byte LEFT_PIN = 2;
 const byte SELECT_PIN = 3;
 const byte RIGHT_PIN = 4;
+const byte MUTE_PIN = 5;
 const byte BUZZER_PIN = 8;
 const byte EPD_CS_PIN = 53;
 const byte EPD_DC_PIN = 49;
@@ -59,7 +62,7 @@ const unsigned long CLOCK_TICK_MS = 60000UL;
 const unsigned long NEEDS_TICK_MS = 20UL * 60000UL;
 const unsigned long EGG_FRAME_MS = 15UL * 60000UL;
 const uint32_t SAVE_MAGIC = 0x54414D41UL;
-const byte SAVE_VERSION = 10;
+const byte SAVE_VERSION = 11;
 const unsigned int PET_ADULT_DAYS = 30;
 const byte WORK_SHORTCUT_PRESSES = 5;
 const byte TEST_SHORTCUT_PRESSES = 10;
@@ -112,6 +115,7 @@ const byte VERY_HUNGRY_FOOD = 20;
 const byte CLEAN_ENERGY_COST = 3;
 const byte LEARN_ENERGY_COST = 3;
 const byte BATH_ENERGY_COST = 4;
+const unsigned long LOVE_MESSAGE_MS = 60UL * 1000UL;
 
 #ifdef WOKWI_SIM
 #define GxEPD_BLACK ILI9341_BLACK
@@ -138,7 +142,7 @@ U8G2_FOR_ADAFRUIT_GFX u8g2Text;
 enum Screen : byte {
   LANGUAGE = 0, SET_CLOCK = 1, SELECT_ANIMAL = 3, EGG = 4, HATCHING = 5,
   HOME = 6, ACTION_SCENE = 7, GAME_MENU = 8, OPTIONS = 9, GAME_PLAY = 10,
-  GROWN_UP = 11, HOSPITAL = 12
+  GROWN_UP = 11, HOSPITAL = 12, LOVE_MESSAGE = 13
 };
 enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, PIG, HAMSTER, PENGUIN, ANIMAL_COUNT };
 enum AnimalPose : byte { POSE_IDLE, POSE_HAPPY, POSE_SLEEP };
@@ -158,7 +162,8 @@ enum UiText : byte {
   TXT_YOU_GOT_IT, TXT_MISSED, TXT_PLUS_20_HAPPY, TXT_PLUS_5_HAPPY,
   TXT_FIND_BALL, TXT_MOVE, TXT_FOUND_20, TXT_EMPTY_5,
   TXT_GROWN_TITLE, TXT_GROWN_DAY, TXT_GROWN_WORK,
-  TXT_HOSPITAL_TITLE, TXT_HOSPITAL_REST, TXT_HOSPITAL_TIMER
+  TXT_HOSPITAL_TITLE, TXT_HOSPITAL_REST, TXT_HOSPITAL_TIMER,
+  TXT_LOVE_MESSAGE
 };
 
 struct Button {
@@ -208,11 +213,13 @@ struct SaveData {
   byte recoveryBonusTicks;
   unsigned int hospitalMinutesLeft;
   byte virusLevel;
+  byte soundMuted;
 };
 
 Button leftButton = {LEFT_PIN, HIGH, HIGH, 0};
 Button selectButton = {SELECT_PIN, HIGH, HIGH, 0};
 Button rightButton = {RIGHT_PIN, HIGH, HIGH, 0};
+Button muteButton = {MUTE_PIN, HIGH, HIGH, 0};
 ClockData gameClock = {12, 0, 1, 1, 2026};
 Pet pet = {80, 80, 80, 80, 100, 0, 0, 0, false, false, 0};
 
@@ -250,6 +257,9 @@ byte lowStatusAlertMask = 0;
 bool lowStatusFlashOn = false;
 unsigned long lastLowStatusFlash = 0;
 bool displayDirty = true;
+bool soundMuted = false;
+bool loveMessageShown = false;
+unsigned long loveMessageStarted = 0;
 bool setupCreatesEgg = true;
 byte languageChoice = 0;
 bool startupShortcutArmed = true;
@@ -280,6 +290,7 @@ void chirp(unsigned int frequency, unsigned int duration) {
 }
 
 void playTune(const int *notes, const uint16_t *lengths, byte count) {
+  if (soundMuted) return;
   for (byte i = 0; i < count; i++) {
     int note = notes[i];
     uint16_t length = lengths[i];
@@ -312,9 +323,27 @@ void coinTune() {
   playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
 }
 
+void unmuteTune() {
+  const int notes[] = {880, 1175};
+  const uint16_t lengths[] = {80, 120};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
 void badStatusTune() {
   const int notes[] = {587, 554, 587, 494};
   const uint16_t lengths[] = {90, 90, 90, 180};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void hospitalTune() {
+  const int notes[] = {784, 523, 784, 523, 784, 523};
+  const uint16_t lengths[] = {110, 110, 110, 110, 110, 220};
+  playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
+}
+
+void loveTune() {
+  const int notes[] = {784, 988, 1175, 1568, 1175};
+  const uint16_t lengths[] = {110, 110, 130, 220, 260};
   playTune(notes, lengths, sizeof(notes) / sizeof(notes[0]));
 }
 
@@ -388,12 +417,31 @@ byte currentSaveStage() {
   return HOME;
 }
 
+void saveSoundSetting() {
+  SaveData data;
+  EEPROM.get(0, data);
+  if (data.magic != SAVE_MAGIC || !savedStageValid(data.stage)) return;
+  data.version = SAVE_VERSION;
+  data.soundMuted = soundMuted ? 1 : 0;
+  EEPROM.put(0, data);
+#if defined(ESP32)
+  EEPROM.commit();
+#endif
+}
+
+void toggleSoundMute() {
+  soundMuted = !soundMuted;
+  noTone(BUZZER_PIN);
+  saveSoundSetting();
+  if (!soundMuted) unmuteTune();
+}
+
 void saveGame(byte stage) {
   SaveData data = {
     SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft,
     languageChoice, SAVE_VERSION, forcedSleepMinutesLeft, awayHungerMinutes,
     waterDepleteRemainder, foodEmptyTicks, waterEmptyTicks, attentionTicks,
-    recoveryBonusTicks, hospitalMinutesLeft, virusLevel
+    recoveryBonusTicks, hospitalMinutesLeft, virusLevel, soundMuted ? 1 : 0
   };
   EEPROM.put(0, data);
 #if defined(ESP32)
@@ -438,6 +486,7 @@ bool loadGame() {
       data.hospitalMinutesLeft : 0;
   virusLevel = saveVersion >= 10 && data.virusLevel <= MAX_VIRUS_LEVEL ?
       data.virusLevel : pet.sick ? 1 : 0;
+  soundMuted = saveVersion >= 11 ? data.soundMuted != 0 : false;
   if (!pet.sick) virusLevel = 0;
   else if (virusLevel == 0) virusLevel = 1;
   if (data.stage == EGG) screen = EGG;
@@ -520,6 +569,7 @@ const __FlashStringHelper *uiText(UiText text) {
       case TXT_HOSPITAL_TITLE: return F("KLINIK");
       case TXT_HOSPITAL_REST: return F("RUHE");
       case TXT_HOSPITAL_TIMER: return F("ZEIT");
+      case TXT_LOVE_MESSAGE: return F("ICH LIEBE DICH");
     }
   }
 
@@ -569,6 +619,7 @@ const __FlashStringHelper *uiText(UiText text) {
     case TXT_HOSPITAL_TITLE: return F("HOSPITAL");
     case TXT_HOSPITAL_REST: return F("RESTING");
     case TXT_HOSPITAL_TIMER: return F("TIME LEFT");
+    case TXT_LOVE_MESSAGE: return F("I LOVE YOU");
   }
   return F("");
 }
@@ -620,6 +671,7 @@ const char *bgText(UiText text) {
     case TXT_HOSPITAL_TITLE: return "БОЛНИЦА";
     case TXT_HOSPITAL_REST: return "ПОЧИВКА";
     case TXT_HOSPITAL_TIMER: return "ОСТАВА";
+    case TXT_LOVE_MESSAGE: return "ОБИЧАМ ТЕ";
   }
   return "";
 }
@@ -1250,6 +1302,19 @@ void drawHospitalScreen() {
   printTwoDigits(minutes);
 }
 
+void drawLargeHeart(int x, int y) {
+  drawScaledBitmap(x - LOVE_HEART_BITMAP_WIDTH / 2, y - LOVE_HEART_BITMAP_HEIGHT / 2,
+                   FLASH_ADDRESS(LOVE_HEART_BITMAP),
+                   LOVE_HEART_BITMAP_WIDTH, LOVE_HEART_BITMAP_HEIGHT, 100);
+}
+
+void drawLoveMessageScreen() {
+  display.drawRoundRect(12, 18, 176, 164, 16, GxEPD_BLACK);
+  display.drawRoundRect(17, 23, 166, 154, 14, GxEPD_BLACK);
+  drawUiCentered(TXT_LOVE_MESSAGE, 50, 2);
+  drawLargeHeart(100, 112);
+}
+
 void drawSetupNumber(UiText title, int value) {
   drawSetupFrame();
   drawUiCentered(title, 30, 2);
@@ -1457,6 +1522,7 @@ void refreshDisplay() {
     else if (screen == OPTIONS) drawOptions();
     else if (screen == GROWN_UP) drawGrownUpScreen();
     else if (screen == HOSPITAL) drawHospitalScreen();
+    else if (screen == LOVE_MESSAGE) drawLoveMessageScreen();
   } while (display.nextPage());
   display.hibernate();
   displayDirty = false;
@@ -1555,6 +1621,44 @@ void checkAgeLimit() {
   if (screen != EGG && screen != GROWN_UP && screen != HOSPITAL && pet.ageDays >= PET_ADULT_DAYS) {
     enterGrownUpScreen();
   }
+}
+
+bool perfectCareCondition() {
+  return !pet.sleeping &&
+         pet.poop == 0 &&
+         pet.dirty == 0 &&
+         !pet.sick &&
+         virusLevel == 0 &&
+         pet.food > 50 &&
+         pet.water > 50 &&
+         pet.energy > 50 &&
+         pet.happy == 100;
+}
+
+void dismissLoveMessage() {
+  if (screen != LOVE_MESSAGE) return;
+  screen = HOME;
+  displayDirty = true;
+}
+
+void enterLoveMessage() {
+  loveMessageShown = true;
+  loveMessageStarted = millis();
+  screen = LOVE_MESSAGE;
+  displayDirty = true;
+  loveTune();
+}
+
+void checkLoveMessageTrigger() {
+  if (!perfectCareCondition()) {
+    loveMessageShown = false;
+    return;
+  }
+  if (screen == HOME && !loveMessageShown) enterLoveMessage();
+}
+
+void updateLoveMessage(unsigned long now) {
+  if (screen == LOVE_MESSAGE && now - loveMessageStarted >= LOVE_MESSAGE_MS) dismissLoveMessage();
 }
 
 void applyEmptyNeedMood() {
@@ -1780,6 +1884,7 @@ void enterHospital() {
   screen = HOSPITAL;
   saveGame(HOSPITAL);
   displayDirty = true;
+  hospitalTune();
 }
 
 void updateHospitalTimer() {
@@ -2095,6 +2200,10 @@ void changeSetupValue(int direction) {
 void handleButtons(bool left, bool select, bool right) {
   if (left || select || right) resetAwayHungerTimer();
   if (screen != HOME && (left || select || right)) resetWorkShortcut();
+  if (screen == LOVE_MESSAGE) {
+    if (left || select || right) dismissLoveMessage();
+    return;
+  }
   if (screen == LANGUAGE) {
     if (left) changeSetupValue(-1);
     if (right) changeSetupValue(1);
@@ -2199,6 +2308,7 @@ void setup() {
   pinMode(LEFT_PIN, INPUT_PULLUP);
   pinMode(SELECT_PIN, INPUT_PULLUP);
   pinMode(RIGHT_PIN, INPUT_PULLUP);
+  pinMode(MUTE_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
   Serial.begin(9600);
 #ifdef WOKWI_SIM
@@ -2254,6 +2364,12 @@ void loop() {
   bool left = pressed(leftButton);
   bool select = pressed(selectButton);
   bool right = pressed(rightButton);
+  bool mute = pressed(muteButton);
+  if (mute) {
+    resetAwayHungerTimer();
+    if (screen == LOVE_MESSAGE) dismissLoveMessage();
+    toggleSoundMute();
+  }
   if (left || select || right) handleButtons(left, select, right);
 
   unsigned long now = millis();
@@ -2275,6 +2391,8 @@ void loop() {
     eggFrame = (eggFrame + 1) % 3;
     displayDirty = true;
   }
+  updateLoveMessage(now);
+  checkLoveMessageTrigger();
   updateLowStatusFlash(now);
   if (displayDirty) refreshDisplay();
 }
