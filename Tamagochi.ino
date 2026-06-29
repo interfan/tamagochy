@@ -677,7 +677,7 @@ void saveGame(byte stage) {
     SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft,
     languageChoice, SAVE_VERSION, forcedSleepMinutesLeft, awayHungerMinutes,
     waterDepleteRemainder, foodEmptyTicks, waterEmptyTicks, attentionTicks,
-    recoveryBonusTicks, hospitalMinutesLeft, virusLevel, soundMuted ? 1 : 0
+    recoveryBonusTicks, hospitalMinutesLeft, virusLevel, (byte)(soundMuted ? 1 : 0)
   };
   writeSaveData(data);
 }

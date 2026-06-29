@@ -1,11 +1,12 @@
 /*
   nRF52840 + 1.54" e-paper Tamagotchi
 
-  Controls everywhere:
-    D2 = LEFT / previous / decrease
-    D3 = SELECT / confirm
-    D4 = RIGHT / next / increase
-    D5 = MUTE / unmute sounds
+  Board:
+    nice!nano / Pro Micro-compatible nRF52840, PCB marked "promicro v1940".
+
+  The installed Arduino core has no native nice!nano target, so this sketch is
+  compiled with the Adafruit Feather nRF52840 target. The defaults below map
+  Pro Micro-labeled pads to the Arduino pin numbers used by that target.
 
   This output sketch is for physical nRF52840 hardware and a real e-paper
   display. It intentionally does not include the Wokwi ILI9341 preview path.
@@ -23,6 +24,7 @@
 #include <InternalFileSystem.h>
 #if defined(ARDUINO_ARCH_NRF52)
 #include <nrf.h>
+#include <nrf_gpio.h>
 #endif
 #include "companion_bitmaps.h"
 #include "animal_idle_variants.h"
@@ -43,31 +45,55 @@ typedef uintptr_t FlashAddress;
 #endif
 
 #ifndef LEFT_PIN
-#define LEFT_PIN 2
+#define LEFT_PIN 11      // Pro Micro D0/TX, raw nRF P0.06
 #endif
 #ifndef SELECT_PIN
-#define SELECT_PIN 3
+#define SELECT_PIN 12    // Pro Micro D1/RX, raw nRF P0.08
 #endif
 #ifndef RIGHT_PIN
-#define RIGHT_PIN 4
+#define RIGHT_PIN 33     // Pro Micro D10/NFC1, raw nRF P0.09
 #endif
 #ifndef MUTE_PIN
-#define MUTE_PIN 5
+#define MUTE_PIN 2       // Pro Micro D11/NFC2, raw nRF P0.10
 #endif
 #ifndef BUZZER_PIN
-#define BUZZER_PIN 6
+#define BUZZER_PIN 23    // Pro Micro D7/SCL, raw nRF P0.11
 #endif
 #ifndef EPD_CS_PIN
-#define EPD_CS_PIN 10
+#define EPD_CS_PIN 1     // Pro Micro D5/CS, raw nRF P0.24
 #endif
 #ifndef EPD_DC_PIN
-#define EPD_DC_PIN 9
+#define EPD_DC_PIN 18    // Pro Micro D15/A0, raw nRF P0.02
 #endif
 #ifndef EPD_RST_PIN
-#define EPD_RST_PIN 8
+#define EPD_RST_PIN 20   // Pro Micro D16/A1, raw nRF P0.29
 #endif
 #ifndef EPD_BUSY_PIN
-#define EPD_BUSY_PIN 7
+#define EPD_BUSY_PIN 21  // Pro Micro D17/A2, raw nRF P0.31
+#endif
+#ifndef EPD_MISO_PIN
+#define EPD_MISO_PIN 28  // Pro Micro D3/MISO, raw nRF P0.20; dummy, not connected
+#endif
+#ifndef EPD_SCK_PIN
+#define EPD_SCK_PIN 29   // Pro Micro D2/SCK, raw nRF P0.17
+#endif
+#ifndef EPD_MOSI_PIN
+#define EPD_MOSI_PIN 30  // Pro Micro D4/MOSI, raw nRF P0.22
+#endif
+#ifndef NICE_NANO_BLUE_LED_NRF_PIN
+#define NICE_NANO_BLUE_LED_NRF_PIN 15
+#endif
+#ifndef NICE_NANO_RED_LED_NRF_PIN
+#define NICE_NANO_RED_LED_NRF_PIN 16
+#endif
+#ifndef NRF_STATUS_BLUE_LED_NRF_PIN
+#define NRF_STATUS_BLUE_LED_NRF_PIN 42
+#endif
+#ifndef NRF_STATUS_RED_LED_NRF_PIN
+#define NRF_STATUS_RED_LED_NRF_PIN 47
+#endif
+#ifndef NICE_NANO_VCC_SWITCH_NRF_PIN
+#define NICE_NANO_VCC_SWITCH_NRF_PIN 13
 #endif
 
 const unsigned long DEBOUNCE_MS = 35;
@@ -464,6 +490,40 @@ bool shouldSaveBeforeLowPower() {
 }
 
 #if defined(ARDUINO_ARCH_NRF52)
+void setExternalVccPower(bool enabled) {
+  // V1940/nice!nano-compatible boards use raw P0.13 as a VCC switch: LOW cuts VCC.
+  nrf_gpio_cfg_output(NICE_NANO_VCC_SWITCH_NRF_PIN);
+  if (enabled) nrf_gpio_pin_set(NICE_NANO_VCC_SWITCH_NRF_PIN);
+  else nrf_gpio_pin_clear(NICE_NANO_VCC_SWITCH_NRF_PIN);
+}
+
+void disableBoardIndicators() {
+  // The common V1940/nice!nano status LEDs are active-low, so HIGH is off.
+  nrf_gpio_cfg_output(NICE_NANO_BLUE_LED_NRF_PIN);
+  nrf_gpio_pin_set(NICE_NANO_BLUE_LED_NRF_PIN);
+  nrf_gpio_cfg_output(NICE_NANO_RED_LED_NRF_PIN);
+  nrf_gpio_pin_set(NICE_NANO_RED_LED_NRF_PIN);
+  nrf_gpio_cfg_output(NRF_STATUS_BLUE_LED_NRF_PIN);
+  nrf_gpio_pin_set(NRF_STATUS_BLUE_LED_NRF_PIN);
+  nrf_gpio_cfg_output(NRF_STATUS_RED_LED_NRF_PIN);
+  nrf_gpio_pin_set(NRF_STATUS_RED_LED_NRF_PIN);
+}
+
+void configureDisplaySpiPins() {
+  SPI.setPins(EPD_MISO_PIN, EPD_SCK_PIN, EPD_MOSI_PIN);
+}
+
+void platformPeripheralPowerOn() {
+  setExternalVccPower(true);
+  disableBoardIndicators();
+  delay(10);
+}
+
+void platformPeripheralPowerOff() {
+  disableBoardIndicators();
+  setExternalVccPower(false);
+}
+
 void nrfButtonWakeIsr() {
   nrfButtonWakeFlag = true;
 }
@@ -512,6 +572,7 @@ unsigned long nrfRtcElapsedMs() {
 }
 
 void platformHardwareInit() {
+  disableBoardIndicators();
   attachInterrupt(digitalPinToInterrupt(LEFT_PIN), nrfButtonWakeIsr, FALLING);
   attachInterrupt(digitalPinToInterrupt(SELECT_PIN), nrfButtonWakeIsr, FALLING);
   attachInterrupt(digitalPinToInterrupt(RIGHT_PIN), nrfButtonWakeIsr, FALLING);
@@ -525,6 +586,11 @@ extern "C" void RTC2_IRQHandler(void) {
   }
 }
 #else
+void setExternalVccPower(bool) {}
+void disableBoardIndicators() {}
+void configureDisplaySpiPins() {}
+void platformPeripheralPowerOn() {}
+void platformPeripheralPowerOff() {}
 void platformHardwareInit() {}
 #endif
 
@@ -566,10 +632,12 @@ void enterLowPowerCycle(unsigned long now) {
   }
 
   display.hibernate();
+  platformPeripheralPowerOff();
   unsigned long beforeSleep = millis();
   platformLowPowerSleep();
   unsigned long wokeAt = millis();
   applyLowPowerElapsed(beforeSleep, wokeAt);
+  disableBoardIndicators();
   lastLowStatusFlash = wokeAt;
   if (anyButtonHeld()) markUserActivity(wokeAt);
 }
@@ -800,7 +868,7 @@ void saveGame(byte stage) {
     SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft,
     languageChoice, SAVE_VERSION, forcedSleepMinutesLeft, awayHungerMinutes,
     waterDepleteRemainder, foodEmptyTicks, waterEmptyTicks, attentionTicks,
-    recoveryBonusTicks, hospitalMinutesLeft, virusLevel, soundMuted ? 1 : 0
+    recoveryBonusTicks, hospitalMinutesLeft, virusLevel, (byte)(soundMuted ? 1 : 0)
   };
   writeSaveData(data);
 }
@@ -1881,6 +1949,7 @@ void drawOptions() {
 }
 
 void refreshDisplay() {
+  platformPeripheralPowerOn();
   display.setFullWindow();
   display.firstPage();
   do {
@@ -1900,6 +1969,7 @@ void refreshDisplay() {
     else if (screen == DEBUG_STATS) drawDebugStatsScreen();
   } while (display.nextPage());
   display.hibernate();
+  platformPeripheralPowerOff();
   displayDirty = false;
 }
 
@@ -2770,6 +2840,8 @@ void setup() {
   pinMode(MUTE_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
   platformHardwareInit();
+  platformPeripheralPowerOn();
+  configureDisplaySpiPins();
   Serial.begin(9600);
   Serial.println(F("Tamagotchi nRF52840 e-paper boot"));
   randomSeed(analogRead(A0));
