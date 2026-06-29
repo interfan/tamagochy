@@ -17,9 +17,10 @@
 
 #include <SPI.h>
 #include <Adafruit_GFX.h>
-#include <EEPROM.h>
 #include <U8g2_for_Adafruit_GFX.h>
 #include <GxEPD2_BW.h>
+#include <Adafruit_LittleFS.h>
+#include <InternalFileSystem.h>
 #if defined(ARDUINO_ARCH_NRF52)
 #include <nrf.h>
 #endif
@@ -28,6 +29,8 @@
 #include "action_icons.h"
 #include "status_bitmaps.h"
 #include "species_action_bitmaps.h"
+
+using namespace Adafruit_LittleFS_Namespace;
 
 #if defined(__AVR__)
 typedef uint_farptr_t FlashAddress;
@@ -79,6 +82,60 @@ const byte SAVE_VERSION = 11;
 const byte SAVE_SLOT_COUNT = 2;
 const size_t EEPROM_STORAGE_BYTES = 512;
 const size_t SAVE_SLOT_BYTES = EEPROM_STORAGE_BYTES / SAVE_SLOT_COUNT;
+const char SAVE_FILE_NAME[] = "/tamagochi.sav";
+
+class NrfSaveStorage {
+ public:
+  void begin(size_t size) {
+    storageSize = min(size, sizeof(buffer));
+    memset(buffer, 0xFF, sizeof(buffer));
+    if (!InternalFS.begin()) return;
+
+    File file(InternalFS);
+    if (file.open(SAVE_FILE_NAME, FILE_O_READ)) {
+      file.read(buffer, storageSize);
+      file.close();
+    }
+  }
+
+  template <typename T>
+  void get(int address, T &value) {
+    if (!rangeValid(address, sizeof(T))) {
+      memset(&value, 0, sizeof(T));
+      return;
+    }
+    memcpy(&value, buffer + address, sizeof(T));
+  }
+
+  template <typename T>
+  void put(int address, const T &value) {
+    if (!rangeValid(address, sizeof(T))) return;
+    memcpy(buffer + address, &value, sizeof(T));
+    dirty = true;
+  }
+
+  bool commit() {
+    if (!dirty) return true;
+    InternalFS.remove(SAVE_FILE_NAME);
+    File file(InternalFS);
+    if (!file.open(SAVE_FILE_NAME, FILE_O_WRITE)) return false;
+    size_t written = file.write(buffer, storageSize);
+    file.close();
+    dirty = written == storageSize ? false : dirty;
+    return written == storageSize;
+  }
+
+ private:
+  bool rangeValid(int address, size_t length) const {
+    return address >= 0 && (size_t)address + length <= storageSize;
+  }
+
+  uint8_t buffer[EEPROM_STORAGE_BYTES];
+  size_t storageSize = EEPROM_STORAGE_BYTES;
+  bool dirty = false;
+};
+
+NrfSaveStorage EEPROM;
 const unsigned int PET_ADULT_DAYS = 25;
 const byte WORK_SHORTCUT_PRESSES = 5;
 const byte TEST_SHORTCUT_PRESSES = 10;

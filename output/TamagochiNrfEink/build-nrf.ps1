@@ -32,9 +32,12 @@ if (-not $fqbn) {
   $fqbn = "adafruit:nrf52:feather52840"
 }
 
+$buildPath = Join-Path $PSScriptRoot ".nrf-build"
+
 Push-Location $PSScriptRoot
 try {
-  & $cli compile --fqbn $fqbn $PSScriptRoot
+  New-Item -ItemType Directory -Force -Path $buildPath | Out-Null
+  & $cli compile --fqbn $fqbn --build-path $buildPath $PSScriptRoot
   if ($LASTEXITCODE -ne 0) {
     throw "nRF52840 e-paper build failed."
   }
@@ -42,4 +45,3 @@ try {
 finally {
   Pop-Location
 }
-

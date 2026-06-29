@@ -3,6 +3,7 @@ build/
 .arduino-build/
 .wokwi-build/
 .wokwi-sketch/
+.nrf-build/
 *.hex
 *.elf
 *.bin

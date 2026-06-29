@@ -20,16 +20,10 @@ Install these in Arduino IDE / Arduino CLI:
 - `Adafruit GFX Library`
 - `GxEPD2`
 - `U8g2_for_Adafruit_GFX`
-- An nRF52840 Arduino core with EEPROM emulation
+- An nRF52840 Arduino core
 
-The sketch expects an EEPROM-style flash API with:
-
-```cpp
-EEPROM.begin(size);
-EEPROM.get(address, value);
-EEPROM.put(address, value);
-EEPROM.commit();
-```
+On Adafruit nRF52, saves are stored in internal LittleFS as
+`/tamagochi.sav`.
 
 ## Default Pins
 
@@ -78,6 +72,35 @@ arduino-cli config add board_manager.additional_urls https://adafruit.github.io/
 arduino-cli core update-index
 arduino-cli core install adafruit:nrf52
 ```
+
+The attached board identifies as:
+
+```text
+Board-ID: nRF52840-nicenano
+```
+
+The Adafruit core does not include a native nice!nano board entry, so the first
+test upload used:
+
+```text
+adafruit:nrf52:feather52840
+```
+
+Compile:
+
+```powershell
+$env:NRF_FQBN="adafruit:nrf52:feather52840"
+.\build-nrf.ps1
+```
+
+Upload through serial DFU while the board is in bootloader mode:
+
+```powershell
+arduino-cli upload -p COM3 --fqbn adafruit:nrf52:feather52840 --input-dir .\.nrf-build
+```
+
+Plain UF2 copy did not flash this bootloader reliably. Serial DFU reported
+`Device programmed`.
 
 ## Sleep Behavior
 
