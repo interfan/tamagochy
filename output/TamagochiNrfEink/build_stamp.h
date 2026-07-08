@@ -1,0 +1,2 @@
+#pragma once
+#define FIRMWARE_BUILD_STAMP "20260702172540561"

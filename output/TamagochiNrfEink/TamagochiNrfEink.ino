@@ -31,6 +31,9 @@
 #include "action_icons.h"
 #include "status_bitmaps.h"
 #include "species_action_bitmaps.h"
+#if __has_include("build_stamp.h")
+#include "build_stamp.h"
+#endif
 
 using namespace Adafruit_LittleFS_Namespace;
 
@@ -100,15 +103,18 @@ const unsigned long DEBOUNCE_MS = 35;
 const unsigned long CLOCK_TICK_MS = 60000UL;
 const unsigned long NEEDS_TICK_MS = 20UL * 60000UL;
 const unsigned long EGG_FRAME_MS = 15UL * 60000UL;
-const unsigned long IDLE_ANIMATION_MS = 6000UL;
+const unsigned long IDLE_ANIMATION_MS = 10000UL;
 const byte IDLE_ANIMATION_FRAMES = 4;
 const uint32_t SAVE_MAGIC = 0x54414D41UL;
 const uint32_t SAVE_RECORD_MAGIC = 0x53564132UL;
-const byte SAVE_VERSION = 11;
+const byte SAVE_VERSION = 12;
 const byte SAVE_SLOT_COUNT = 2;
 const size_t EEPROM_STORAGE_BYTES = 512;
 const size_t SAVE_SLOT_BYTES = EEPROM_STORAGE_BYTES / SAVE_SLOT_COUNT;
 const char SAVE_FILE_NAME[] = "/tamagochi.sav";
+#ifndef FIRMWARE_BUILD_STAMP
+#define FIRMWARE_BUILD_STAMP __DATE__ " " __TIME__
+#endif
 
 class NrfSaveStorage {
  public:
@@ -218,7 +224,10 @@ const byte BATH_ENERGY_COST = 4;
 const unsigned long LOVE_MESSAGE_MS = 60UL * 1000UL;
 const unsigned long ACTIVE_WINDOW_MS = 60UL * 1000UL;
 const unsigned long LOW_POWER_WAKE_MS = 60UL * 1000UL;
-const bool IDLE_ANIMATION_AUTO_REFRESH = false;
+const bool EPD_PARTIAL_REFRESH_ENABLED = true;
+const bool EPD_ACTION_SELECTION_PARTIAL_ENABLED = true;
+const byte MAX_PARTIAL_REFRESHES = 3;
+const bool IDLE_ANIMATION_AUTO_REFRESH = true;
 
 GxEPD2_BW<GxEPD2_154_D67, GxEPD2_154_D67::HEIGHT> display(
     GxEPD2_154_D67(EPD_CS_PIN, EPD_DC_PIN, EPD_RST_PIN, EPD_BUSY_PIN));
@@ -256,6 +265,13 @@ struct Button {
   bool stable;
   bool last;
   unsigned long changedAt;
+};
+
+struct DisplayWindow {
+  int x;
+  int y;
+  int w;
+  int h;
 };
 
 struct ClockData {
@@ -299,6 +315,7 @@ struct SaveData {
   unsigned int hospitalMinutesLeft;
   byte virusLevel;
   byte soundMuted;
+  uint32_t firmwareBuildId;
 };
 
 struct SaveRecord {
@@ -351,6 +368,22 @@ byte lowStatusAlertMask = 0;
 bool lowStatusFlashOn = false;
 unsigned long lastLowStatusFlash = 0;
 bool displayDirty = true;
+bool displayHasKnownFrame = false;
+Screen lastRenderedScreen = SET_CLOCK;
+byte partialRefreshCount = 0;
+bool homeSnapshotValid = false;
+Animal lastHomeAnimal = CAT;
+byte lastHomeFood = 0;
+byte lastHomeWater = 0;
+byte lastHomeHappy = 0;
+byte lastHomeEnergy = 0;
+byte lastHomeIdleFrame = 0;
+byte lastHomePoop = 0;
+byte lastHomeVirusLevel = 0;
+bool lastHomeSick = false;
+bool lastHomeDirtyVisible = false;
+bool lastHomeLowStatusFlashOn = false;
+Action lastHomeSelectedAction = FEED;
 bool soundMuted = false;
 bool loveMessageShown = false;
 unsigned long loveMessageStarted = 0;
@@ -486,7 +519,8 @@ void markUserActivity(unsigned long now) {
 }
 
 bool shouldSaveBeforeLowPower() {
-  return screen == EGG || screen == HOME || screen == GROWN_UP || screen == HOSPITAL;
+  return screen == EGG || screen == HOME || screen == GROWN_UP || screen == HOSPITAL ||
+         (screen == ACTION_SCENE && sceneAction == OVERNIGHT && pet.sleeping);
 }
 
 #if defined(ARDUINO_ARCH_NRF52)
@@ -624,7 +658,10 @@ void applyLowPowerElapsed(unsigned long beforeSleep, unsigned long wokeAt) {
 }
 
 void enterLowPowerCycle(unsigned long now) {
-  if (activeWindowOpen(now) || displayDirty || screen == ACTION_SCENE || screen == HATCHING) return;
+  bool overnightSceneCanSleep = screen == ACTION_SCENE && sceneAction == OVERNIGHT && pet.sleeping;
+  if (activeWindowOpen(now) || displayDirty ||
+      (screen == ACTION_SCENE && !overnightSceneCanSleep) ||
+      screen == HATCHING) return;
 
   if (!lowPowerCycleSaved && shouldSaveBeforeLowPower()) {
     saveGame(currentSaveStage());
@@ -633,6 +670,9 @@ void enterLowPowerCycle(unsigned long now) {
 
   display.hibernate();
   platformPeripheralPowerOff();
+  displayHasKnownFrame = false;
+  homeSnapshotValid = false;
+  partialRefreshCount = 0;
   unsigned long beforeSleep = millis();
   platformLowPowerSleep();
   unsigned long wokeAt = millis();
@@ -643,29 +683,8 @@ void enterLowPowerCycle(unsigned long now) {
 }
 
 void updateLowStatusFlash(unsigned long now) {
-  if (!activeWindowOpen(now)) {
-    if (lowStatusFlashOn) {
-      lowStatusFlashOn = false;
-      if (screen == HOME) displayDirty = true;
-    }
-    lastLowStatusFlash = now;
-    return;
-  }
-
-  if (screen != HOME || currentLowStatusMask() == 0) {
-    if (lowStatusFlashOn) {
-      lowStatusFlashOn = false;
-      if (screen == HOME) displayDirty = true;
-    }
-    lastLowStatusFlash = now;
-    return;
-  }
-
-  if (now - lastLowStatusFlash >= LOW_STATUS_FLASH_MS) {
-    lastLowStatusFlash = now;
-    lowStatusFlashOn = !lowStatusFlashOn;
-    displayDirty = true;
-  }
+  lowStatusFlashOn = false;
+  lastLowStatusFlash = now;
 }
 
 void lifeUpTune() {
@@ -714,6 +733,12 @@ uint32_t crc32Bytes(const uint8_t *data, size_t length) {
     }
   }
   return ~crc;
+}
+
+uint32_t currentFirmwareBuildId() {
+  size_t length = 0;
+  while (FIRMWARE_BUILD_STAMP[length] != '\0') length++;
+  return crc32Bytes(reinterpret_cast<const uint8_t *>(FIRMWARE_BUILD_STAMP), length);
 }
 
 uint32_t saveRecordCrc(const SaveRecord &record) {
@@ -853,6 +878,7 @@ void saveSoundSetting() {
   if (!loadBestSaveData(data, legacySave)) return;
   data.version = SAVE_VERSION;
   data.soundMuted = soundMuted ? 1 : 0;
+  data.firmwareBuildId = currentFirmwareBuildId();
   writeSaveData(data);
 }
 
@@ -868,7 +894,8 @@ void saveGame(byte stage) {
     SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft,
     languageChoice, SAVE_VERSION, forcedSleepMinutesLeft, awayHungerMinutes,
     waterDepleteRemainder, foodEmptyTicks, waterEmptyTicks, attentionTicks,
-    recoveryBonusTicks, hospitalMinutesLeft, virusLevel, (byte)(soundMuted ? 1 : 0)
+    recoveryBonusTicks, hospitalMinutesLeft, virusLevel, (byte)(soundMuted ? 1 : 0),
+    currentFirmwareBuildId()
   };
   writeSaveData(data);
 }
@@ -877,6 +904,9 @@ bool loadGame() {
   SaveData data;
   bool legacySave = false;
   if (!loadBestSaveData(data, legacySave)) {
+    return false;
+  }
+  if (data.version < SAVE_VERSION || data.firmwareBuildId != currentFirmwareBuildId()) {
     return false;
   }
   if (!applyLoadedSaveData(data)) return false;
@@ -1234,14 +1264,8 @@ void drawStatusIcon(byte icon, int x, int y) {
 void drawMeter(int x, int y, int w, byte icon, int value) {
   drawStatusIcon(icon, x, y - 2);
   int fillWidth = map(constrain(value, 0, 100), 0, 100, 0, w - 22);
-  bool flash = value < LOW_STATUS_THRESHOLD && lowStatusFlashOn;
-  if (flash) {
-    display.fillRoundRect(x + 18, y - 1, w - 18, 7, 3, GxEPD_BLACK);
-    if (fillWidth > 0) display.fillRoundRect(x + 20, y + 1, fillWidth, 3, 1, GxEPD_WHITE);
-  } else {
-    display.drawRoundRect(x + 18, y - 1, w - 18, 7, 3, GxEPD_BLACK);
-    if (fillWidth > 0) display.fillRoundRect(x + 20, y + 1, fillWidth, 3, 1, GxEPD_BLACK);
-  }
+  display.drawRoundRect(x + 18, y - 1, w - 18, 7, 3, GxEPD_BLACK);
+  if (fillWidth > 0) display.fillRoundRect(x + 20, y + 1, fillWidth, 3, 1, GxEPD_BLACK);
 }
 
 void drawBookCorner(int x, int y, int sx, int sy) {
@@ -1344,6 +1368,13 @@ void drawPoopOverlay() {
     drawPoopIcon(157, 116, 84);
     drawPoopIcon(173, 109, 96);
   }
+}
+
+void drawHomeStatusBars() {
+  drawMeter(5, 8, 90, 0, pet.food);
+  drawMeter(5, 22, 90, 1, pet.water);
+  drawMeter(105, 8, 90, 2, pet.happy);
+  drawMeter(105, 22, 90, 3, pet.energy);
 }
 
 void drawSmellMark(int x, int y, int scalePercent = 100) {
@@ -1629,6 +1660,53 @@ void drawActionIcon(Action action, int x, int y, bool selected) {
   drawScaledBitmap(x, y, bitmap, ACTION_ICON_WIDTH, ACTION_ICON_HEIGHT, 100);
 }
 
+void actionIconPosition(Action action, int &x, int &y) {
+  byte index = (byte)action;
+  x = index < 6 ? 3 + index * 32 : 18 + (index - 6) * 36;
+  y = index < 6 ? 144 : 173;
+}
+
+void drawActionIconCell(Action action, bool selected) {
+  int x;
+  int y;
+  actionIconPosition(action, x, y);
+  display.fillRect(x - 3, y - 3, 34, 30, GxEPD_WHITE);
+  drawActionIcon(action, x, y, selected);
+}
+
+void drawActionStrip(bool clearBackground = true) {
+  if (clearBackground) display.fillRect(0, 139, 200, 61, GxEPD_WHITE);
+  for (byte i = 0; i < SETTINGS; i++) {
+    int x;
+    int y;
+    actionIconPosition((Action)i, x, y);
+    drawActionIcon((Action)i, x, y, selectedAction == i);
+  }
+}
+
+void refreshActionSelectionPartial(Action previousAction, Action currentAction) {
+  if (!EPD_ACTION_SELECTION_PARTIAL_ENABLED ||
+      screen != HOME ||
+      previousAction == currentAction ||
+      !displayHasKnownFrame ||
+      lastRenderedScreen != HOME) {
+    displayDirty = true;
+    return;
+  }
+
+  platformPeripheralPowerOn();
+  display.setPartialWindow(0, 139, 200, 61);
+  display.firstPage();
+  do {
+    drawActionStrip();
+  } while (display.nextPage());
+  displayHasKnownFrame = true;
+  lastRenderedScreen = HOME;
+  if (partialRefreshCount < 255) partialRefreshCount++;
+  noteHomeSnapshot();
+  displayDirty = false;
+}
+
 void printActionName(Action action) {
   if (useCyrillicText()) {
     setCyrillicFont(1, GxEPD_BLACK);
@@ -1639,19 +1717,12 @@ void printActionName(Action action) {
 }
 
 void drawHome() {
-  drawMeter(5, 8, 90, 0, pet.food);
-  drawMeter(5, 22, 90, 1, pet.water);
-  drawMeter(105, 8, 90, 2, pet.happy);
-  drawMeter(105, 22, 90, 3, pet.energy);
-  drawAnimal(100, 88, animal, idleAnimationFrame);
+  drawHomeStatusBars();
+  drawAnimal(100, 86, animal, idleAnimationFrame);
   if (pet.poop) drawPoopOverlay();
   if (pet.sick) drawVirusOverlay();
   if (petIsDirty()) drawDirtOverlay();
-  for (byte i = 0; i < SETTINGS; i++) {
-    int x = i < 6 ? 3 + i * 32 : 18 + (i - 6) * 36;
-    int y = i < 6 ? 144 : 173;
-    drawActionIcon((Action)i, x, y, selectedAction == i);
-  }
+  drawActionStrip(false);
 }
 
 void drawBriefcase(int x, int y) {
@@ -1693,6 +1764,10 @@ void drawHospitalScreen() {
   drawHospitalBuildingBitmap();
   drawUiCentered(TXT_HOSPITAL_REST, 145, 1);
   drawUiCentered(TXT_HOSPITAL_TIMER, 160, 1);
+  drawHospitalTimerValue();
+}
+
+void drawHospitalTimerValue() {
   unsigned int hours = hospitalMinutesLeft / 60;
   byte minutes = hospitalMinutesLeft % 60;
   display.setTextSize(2);
@@ -1700,6 +1775,11 @@ void drawHospitalScreen() {
   printTwoDigits(hours);
   display.print(':');
   printTwoDigits(minutes);
+}
+
+void drawHospitalTimerWindow() {
+  display.fillRect(56, 172, 88, 24, GxEPD_WHITE);
+  drawHospitalTimerValue();
 }
 
 void drawLargeHeart(int x, int y) {
@@ -1948,29 +2028,196 @@ void drawOptions() {
   drawUiCentered(TXT_OPTIONS_HINT, 181, 1);
 }
 
-void refreshDisplay() {
+void noteHomeSnapshot() {
+  homeSnapshotValid = true;
+  lastHomeAnimal = animal;
+  lastHomeFood = pet.food;
+  lastHomeWater = pet.water;
+  lastHomeHappy = pet.happy;
+  lastHomeEnergy = pet.energy;
+  lastHomeIdleFrame = idleAnimationFrame;
+  lastHomePoop = pet.poop;
+  lastHomeVirusLevel = virusLevel;
+  lastHomeSick = pet.sick;
+  lastHomeDirtyVisible = petIsDirty();
+  lastHomeLowStatusFlashOn = lowStatusFlashOn;
+  lastHomeSelectedAction = selectedAction;
+}
+
+bool homeLayoutMatchesSnapshot() {
+  return homeSnapshotValid &&
+         lastHomeAnimal == animal &&
+         lastHomeIdleFrame == idleAnimationFrame &&
+         lastHomePoop == pet.poop &&
+         lastHomeVirusLevel == virusLevel &&
+         lastHomeSick == pet.sick &&
+         lastHomeDirtyVisible == petIsDirty() &&
+         lastHomeSelectedAction == selectedAction;
+}
+
+bool homeStatusChangedSinceSnapshot() {
+  return lastHomeFood != pet.food ||
+         lastHomeWater != pet.water ||
+         lastHomeHappy != pet.happy ||
+         lastHomeEnergy != pet.energy ||
+         lastHomeLowStatusFlashOn != lowStatusFlashOn;
+}
+
+bool canUseHomeStatusPartialRefresh() {
+  return EPD_PARTIAL_REFRESH_ENABLED &&
+         screen == HOME &&
+         displayHasKnownFrame &&
+         lastRenderedScreen == HOME &&
+         homeLayoutMatchesSnapshot() &&
+         homeStatusChangedSinceSnapshot();
+}
+
+void refreshHomeStatusPartial() {
   platformPeripheralPowerOn();
-  display.setFullWindow();
+  display.setPartialWindow(0, 0, 200, 38);
   display.firstPage();
   do {
-    display.fillScreen(GxEPD_WHITE);
-    display.setTextColor(GxEPD_BLACK);
-    if (screen == LANGUAGE) drawLanguageScreen();
-    else if (screen == SET_CLOCK || screen == SELECT_ANIMAL) drawSetupScreen();
-    else if (screen == EGG) drawEggScreen();
-    else if (screen == HOME) drawHome();
-    else if (screen == ACTION_SCENE) drawScene();
-    else if (screen == GAME_MENU) drawGameMenu();
-    else if (screen == GAME_PLAY) drawGamePlay();
-    else if (screen == OPTIONS) drawOptions();
-    else if (screen == GROWN_UP) drawGrownUpScreen();
-    else if (screen == HOSPITAL) drawHospitalScreen();
-    else if (screen == LOVE_MESSAGE) drawLoveMessageScreen();
-    else if (screen == DEBUG_STATS) drawDebugStatsScreen();
+    display.fillRect(0, 0, 200, 38, GxEPD_WHITE);
+    drawHomeStatusBars();
   } while (display.nextPage());
-  display.hibernate();
-  platformPeripheralPowerOff();
+  displayHasKnownFrame = true;
+  lastRenderedScreen = HOME;
+  if (partialRefreshCount < 255) partialRefreshCount++;
+  noteHomeSnapshot();
   displayDirty = false;
+}
+
+bool screenSupportsPartial(Screen currentScreen) {
+  switch (currentScreen) {
+    case LANGUAGE:
+    case SET_CLOCK:
+    case SELECT_ANIMAL:
+    case EGG:
+    case HOME:
+    case ACTION_SCENE:
+    case GAME_MENU:
+    case GAME_PLAY:
+    case OPTIONS:
+    case HOSPITAL:
+    case DEBUG_STATS:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool isInitialSetupScreen(Screen currentScreen) {
+  return currentScreen == LANGUAGE ||
+         currentScreen == SET_CLOCK ||
+         currentScreen == SELECT_ANIMAL;
+}
+
+DisplayWindow partialWindowForScreen(Screen currentScreen) {
+  switch (currentScreen) {
+    case EGG:
+    case ACTION_SCENE:
+      return {8, 8, 184, 184};
+    case HOSPITAL:
+      return {56, 172, 88, 24};
+    default:
+      return {0, 0, 200, 200};
+  }
+}
+
+void drawCurrentScreen() {
+  display.setTextColor(GxEPD_BLACK);
+  if (screen == LANGUAGE) drawLanguageScreen();
+  else if (screen == SET_CLOCK || screen == SELECT_ANIMAL) drawSetupScreen();
+  else if (screen == EGG) drawEggScreen();
+  else if (screen == HOME) drawHome();
+  else if (screen == ACTION_SCENE) drawScene();
+  else if (screen == GAME_MENU) drawGameMenu();
+  else if (screen == GAME_PLAY) drawGamePlay();
+  else if (screen == OPTIONS) drawOptions();
+  else if (screen == GROWN_UP) drawGrownUpScreen();
+  else if (screen == HOSPITAL) drawHospitalScreen();
+  else if (screen == LOVE_MESSAGE) drawLoveMessageScreen();
+  else if (screen == DEBUG_STATS) drawDebugStatsScreen();
+}
+
+bool canUsePartialRefresh() {
+  bool setupPartial = isInitialSetupScreen(screen) && isInitialSetupScreen(lastRenderedScreen);
+  bool homePartial = screen == HOME && lastRenderedScreen == HOME;
+  return EPD_PARTIAL_REFRESH_ENABLED &&
+         displayHasKnownFrame &&
+         (screen == lastRenderedScreen || setupPartial) &&
+         screenSupportsPartial(screen) &&
+         (setupPartial || homePartial || partialRefreshCount < MAX_PARTIAL_REFRESHES);
+}
+
+void noteDisplayRefresh(bool partial) {
+  displayHasKnownFrame = true;
+  lastRenderedScreen = screen;
+  if (partial) {
+    if (partialRefreshCount < 255) partialRefreshCount++;
+  } else {
+    partialRefreshCount = 0;
+  }
+  displayDirty = false;
+}
+
+void refreshDisplay() {
+  if (canUseHomeStatusPartialRefresh()) {
+    refreshHomeStatusPartial();
+    return;
+  }
+
+  platformPeripheralPowerOn();
+  bool partial = canUsePartialRefresh();
+  bool hospitalTimerOnly = partial && screen == HOSPITAL;
+  DisplayWindow window = partialWindowForScreen(screen);
+  if (partial) display.setPartialWindow(window.x, window.y, window.w, window.h);
+  else display.setFullWindow();
+
+  display.firstPage();
+  do {
+    if (hospitalTimerOnly) {
+      drawHospitalTimerWindow();
+    } else {
+      if (partial) display.fillRect(window.x, window.y, window.w, window.h, GxEPD_WHITE);
+      else display.fillScreen(GxEPD_WHITE);
+      drawCurrentScreen();
+    }
+  } while (display.nextPage());
+  noteDisplayRefresh(partial);
+  if (screen == HOME) noteHomeSnapshot();
+  else homeSnapshotValid = false;
+}
+
+void drawHatchingFrame(byte frame) {
+  if (frame < 3) {
+    drawEggScaled(100, 100, frame, 100);
+  } else {
+    drawAnimalScaled(100, 96, animal, 1, 100);
+    drawHeart(24, 54);
+    drawHeart(164, 62);
+  }
+}
+
+void refreshHatchingFrame(byte frame) {
+  platformPeripheralPowerOn();
+  bool partial = EPD_PARTIAL_REFRESH_ENABLED &&
+                 displayHasKnownFrame &&
+                 lastRenderedScreen == HATCHING &&
+                 partialRefreshCount < MAX_PARTIAL_REFRESHES;
+  DisplayWindow window = {8, 8, 184, 184};
+  if (partial) display.setPartialWindow(window.x, window.y, window.w, window.h);
+  else display.setFullWindow();
+
+  display.firstPage();
+  do {
+    if (partial) display.fillRect(window.x, window.y, window.w, window.h, GxEPD_WHITE);
+    else display.fillScreen(GxEPD_WHITE);
+    drawHatchingFrame(frame);
+  } while (display.nextPage());
+  displayHasKnownFrame = true;
+  lastRenderedScreen = HATCHING;
+  partialRefreshCount = partial ? partialRefreshCount + 1 : 0;
 }
 
 void animateAction(Action action) {
@@ -1983,6 +2230,11 @@ void animateAction(Action action) {
   }
   sceneFrame = 3;
   delay(1000);
+  if (action == OVERNIGHT) {
+    saveGame(HOME);
+    displayDirty = false;
+    return;
+  }
   screen = HOME;
   displayDirty = true;
   refreshDisplay();
@@ -1991,18 +2243,7 @@ void animateAction(Action action) {
 void animateEggHatch() {
   screen = HATCHING;
   for (byte frame = 0; frame < 4; frame++) {
-    display.setFullWindow();
-    display.firstPage();
-    do {
-      display.fillScreen(GxEPD_WHITE);
-      if (frame < 3) {
-        drawEggScaled(100, 100, frame, 100);
-      } else {
-        drawAnimalScaled(100, 96, animal, 1, 100);
-        drawHeart(24, 54);
-        drawHeart(164, 62);
-      }
-    } while (display.nextPage());
+    refreshHatchingFrame(frame);
     chirp(500 + frame * 180, 160);
     delay(350);
   }
@@ -2400,9 +2641,11 @@ void advanceClock() {
       forcedSleepMinutesLeft--;
       pet.sleeping = true;
       if (forcedSleepMinutesLeft == 0) {
+        bool wasOvernightScene = screen == ACTION_SCENE && sceneAction == OVERNIGHT;
         pet.sleeping = false;
         makeVeryHungry();
         updateLowStatusAlerts(true);
+        if (wasOvernightScene) screen = HOME;
         saveGame(HOME);
         displayDirty = true;
       }
@@ -2557,7 +2800,12 @@ void performAction(Action action) {
       else pet.sleeping = true;
       pet.energy = clampStat(pet.energy + 8);
       break;
-    case OVERNIGHT: pet.sleeping = true; pet.energy = 100; makeVeryHungry(); break;
+    case OVERNIGHT:
+      forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
+      pet.sleeping = true;
+      pet.energy = 100;
+      makeVeryHungry();
+      break;
     case CLEAN:
       {
         bool hadPoop = pet.poop > 0;
@@ -2791,11 +3039,16 @@ void handleButtons(bool left, bool select, bool right) {
     if (handleDebugShortcut(left, select, right)) return;
     if (handleTestShortcut(left, select, right)) return;
     if (handleWorkShortcut(left, select, right)) return;
+    Action previousAction = selectedAction;
     if (left) selectedAction = (Action)((selectedAction + SETTINGS - 1) % SETTINGS);
     if (right) selectedAction = (Action)((selectedAction + 1) % SETTINGS);
     if (select) performAction(selectedAction);
-    if (left || right) { chirp(900, 25); displayDirty = true; }
+    if ((left || right) && !select) {
+      chirp(900, 25);
+      refreshActionSelectionPartial(previousAction, selectedAction);
+    }
   } else if (screen == ACTION_SCENE && select) {
+    if (sceneAction == OVERNIGHT && pet.sleeping) return;
     screen = HOME;
     displayDirty = true;
   } else if (screen == GAME_MENU) {

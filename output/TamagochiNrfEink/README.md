@@ -124,9 +124,12 @@ Plain UF2 copy did not flash this bootloader reliably. Serial DFU reported
 
 This build uses real nRF System ON sleep:
 
-- E-paper is hibernated after every refresh.
+- E-paper stays awake during the 60-second active window so partial refresh can use a known previous frame.
 - The V1940/nice!nano-compatible VCC switch on raw `P0.13` is held HIGH while peripherals are powered and driven LOW after e-paper refresh.
 - Programmable indicator candidates `P0.15`, `P0.16`, `P1.10`, and `P1.15` are forced HIGH/off.
+- Full refresh is used for wake/boot, screen changes, first egg/main screens, action start/end, grown-up screen, and post-sleep recovery.
+- Partial refresh is used for same-screen setup changes, egg wobble, hatching frames, HOME changes, action-strip selection, action animation frames, and HOME status-bar meter/flashing updates.
+- A full cleanup refresh is forced after 3 general partial refreshes, but HOME status-bar meter/flashing updates stay top-window partial while the display frame is still valid.
 - After 60 seconds without input, the MCU sleeps.
 - RTC2 wakes the MCU every 60 seconds to update timers/stats.
 - Button GPIO wake exits sleep immediately.

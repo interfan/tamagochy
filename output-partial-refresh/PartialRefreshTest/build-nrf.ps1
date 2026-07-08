@@ -33,19 +33,15 @@ if (-not $fqbn) {
 }
 
 $buildPath = Join-Path $PSScriptRoot ".nrf-build"
-$buildStampPath = Join-Path $PSScriptRoot "build_stamp.h"
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+$includeFlag = "-I$repoRoot"
 
 Push-Location $PSScriptRoot
 try {
   New-Item -ItemType Directory -Force -Path $buildPath | Out-Null
-  $buildStamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmssfff")
-  Set-Content -LiteralPath $buildStampPath -Encoding ASCII -NoNewline -Value @"
-#pragma once
-#define FIRMWARE_BUILD_STAMP "$buildStamp"
-"@
-  & $cli compile --fqbn $fqbn --build-path $buildPath $PSScriptRoot
+  & $cli compile --fqbn $fqbn --build-path $buildPath --build-property "compiler.cpp.extra_flags=$includeFlag" $PSScriptRoot
   if ($LASTEXITCODE -ne 0) {
-    throw "nRF52840 e-paper build failed."
+    throw "Partial refresh test build failed."
   }
 }
 finally {
