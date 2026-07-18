@@ -107,7 +107,7 @@ const unsigned long IDLE_ANIMATION_MS = 10000UL;
 const byte IDLE_ANIMATION_FRAMES = 4;
 const uint32_t SAVE_MAGIC = 0x54414D41UL;
 const uint32_t SAVE_RECORD_MAGIC = 0x53564132UL;
-const byte SAVE_VERSION = 12;
+const byte SAVE_VERSION = 13;
 const byte SAVE_SLOT_COUNT = 2;
 const size_t EEPROM_STORAGE_BYTES = 512;
 const size_t SAVE_SLOT_BYTES = EEPROM_STORAGE_BYTES / SAVE_SLOT_COUNT;
@@ -169,11 +169,11 @@ class NrfSaveStorage {
 
 NrfSaveStorage EEPROM;
 const unsigned int PET_ADULT_DAYS = 25;
-const byte WORK_SHORTCUT_PRESSES = 5;
-const byte TEST_SHORTCUT_PRESSES = 10;
-const byte DEBUG_SHORTCUT_PRESSES = 5;
 const unsigned int FORCED_SLEEP_MINUTES = 12U * 60U;
 const unsigned int HOSPITAL_MINUTES = 24U * 60U;
+const unsigned int POST_DEEP_SLEEP_HOSPITAL_GRACE_MINUTES = 60U;
+const unsigned long SELECT_HOLD_WAKE_MS = 5UL * 1000UL;
+const byte HOSPITAL_EXIT_MUTE_PRESSES = 12;
 const unsigned int AWAY_HUNGER_MINUTES = 4U * 60U;
 const byte FOOD_EMPTY_SURVIVAL_TICKS = 15;
 const byte WATER_EMPTY_SURVIVAL_TICKS = 9;
@@ -191,6 +191,9 @@ const byte DIRTY_FULL_HAPPY_LIMIT = 20;
 const byte LOW_NEED_VIRUS_THRESHOLD = 25;
 const byte LOW_STATUS_THRESHOLD = 25;
 const unsigned long LOW_STATUS_FLASH_MS = 700UL;
+const unsigned int BUZZER_LOUD_MIN_HZ = 2000U;
+const unsigned int BUZZER_LOUD_MAX_HZ = 4000U;
+const unsigned int BUZZER_TWO_OCTAVE_LIMIT_HZ = 1000U;
 const byte STATUS_LOW_FOOD = 1 << 0;
 const byte STATUS_LOW_WATER = 1 << 1;
 const byte STATUS_LOW_HAPPY = 1 << 2;
@@ -236,7 +239,7 @@ U8G2_FOR_ADAFRUIT_GFX u8g2Text;
 enum Screen : byte {
   LANGUAGE = 0, SET_CLOCK = 1, SELECT_ANIMAL = 3, EGG = 4, HATCHING = 5,
   HOME = 6, ACTION_SCENE = 7, GAME_MENU = 8, OPTIONS = 9, GAME_PLAY = 10,
-  GROWN_UP = 11, HOSPITAL = 12, LOVE_MESSAGE = 13, DEBUG_STATS = 14
+  GROWN_UP = 11, HOSPITAL = 12, LOVE_MESSAGE = 13, PET_INFO = 14
 };
 enum Animal : byte { CAT, DOG, BUNNY, PANDA, DRAGON, FOX, PIG, HAMSTER, PENGUIN, ANIMAL_COUNT };
 enum AnimalPose : byte { POSE_IDLE, POSE_HAPPY, POSE_SLEEP };
@@ -244,7 +247,7 @@ enum Action : byte {
   FEED, WATER, PLAY, SLEEP, OVERNIGHT, CLEAN, MEDICINE,
   LEARN, PET_ACTION, GROOM, WASH, SETTINGS, ACTION_COUNT
 };
-enum MiniGame : byte { GAME_HIGH_LOW, GAME_COIN_TOSS, GAME_SHELL, MINI_GAME_COUNT };
+enum MiniGame : byte { GAME_HIGH_LOW, GAME_COIN_TOSS, GAME_SHELL, GAME_INFO, MINI_GAME_COUNT };
 enum MiniGamePhase : byte { MINI_GAME_PICK, MINI_GAME_RESULT };
 enum UiText : byte {
   TXT_SET_HOUR, TXT_SET_MINUTE, TXT_OPTIONS, TXT_CHANGE, TXT_SET_CLOCK, TXT_NEW_EGG,
@@ -257,7 +260,7 @@ enum UiText : byte {
   TXT_FIND_BALL, TXT_MOVE, TXT_FOUND_20, TXT_EMPTY_5,
   TXT_GROWN_TITLE, TXT_GROWN_DAY, TXT_GROWN_WORK,
   TXT_HOSPITAL_TITLE, TXT_HOSPITAL_REST, TXT_HOSPITAL_TIMER,
-  TXT_LOVE_MESSAGE
+  TXT_LOVE_MESSAGE, TXT_INFO, TXT_DAYS_OLD, TXT_WEIGHT, TXT_KG
 };
 
 struct Button {
@@ -316,6 +319,7 @@ struct SaveData {
   byte virusLevel;
   byte soundMuted;
   uint32_t firmwareBuildId;
+  unsigned int postDeepSleepHospitalGraceMinutes;
 };
 
 struct SaveRecord {
@@ -367,6 +371,8 @@ byte virusLevel = 0;
 byte lowStatusAlertMask = 0;
 bool lowStatusFlashOn = false;
 unsigned long lastLowStatusFlash = 0;
+unsigned long overnightSelectHeldSince = 0;
+unsigned int postDeepSleepHospitalGraceMinutes = 0;
 bool displayDirty = true;
 bool displayHasKnownFrame = false;
 Screen lastRenderedScreen = SET_CLOCK;
@@ -389,16 +395,9 @@ bool loveMessageShown = false;
 unsigned long loveMessageStarted = 0;
 bool setupCreatesEgg = true;
 byte languageChoice = 0;
-bool startupShortcutArmed = true;
-unsigned long startupSelectHeldSince = 0;
 byte eggSelectCount = 0;
 unsigned long lastEggSelect = 0;
-byte workShortcutRightCount = 0;
-byte workShortcutLeftCount = 0;
-byte testShortcutRightCount = 0;
-byte testShortcutLeftCount = 0;
-byte debugShortcutLeftCount = 0;
-byte debugShortcutRightCount = 0;
+byte hospitalMuteExitCount = 0;
 unsigned long lastUserActivity = 0;
 bool lowPowerCycleSaved = false;
 uint32_t saveSequence = 0;
@@ -422,22 +421,47 @@ byte daysInMonth(byte month, unsigned int year) {
   return month == 2 && leapYear(year) ? 29 : days[month - 1];
 }
 
+unsigned int loudBuzzerFrequency(unsigned int frequency) {
+  if (frequency == 0) return 0;
+  unsigned long shifted = frequency < BUZZER_TWO_OCTAVE_LIMIT_HZ ?
+      (unsigned long)frequency * 4UL : (unsigned long)frequency * 2UL;
+  while (shifted < BUZZER_LOUD_MIN_HZ) shifted *= 2UL;
+  while (shifted > BUZZER_LOUD_MAX_HZ) shifted /= 2UL;
+  return (unsigned int)shifted;
+}
+
 void chirp(unsigned int frequency, unsigned int duration) {
-  (void)frequency;
-  (void)duration;
+  if (soundMuted) {
+    silenceBuzzer();
+    return;
+  }
+  tone(BUZZER_PIN, loudBuzzerFrequency(frequency));
+  delay(duration);
+  silenceBuzzer();
+}
+
+void silenceBuzzer() {
+  noTone(BUZZER_PIN);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
 }
 
 void playTune(const int *notes, const uint16_t *lengths, byte count) {
-  if (soundMuted) return;
+  if (soundMuted) {
+    silenceBuzzer();
+    return;
+  }
   for (byte i = 0; i < count; i++) {
     int note = notes[i];
     uint16_t length = lengths[i];
     if (note > 0) {
-      tone(BUZZER_PIN, note, length);
+      tone(BUZZER_PIN, loudBuzzerFrequency(note));
     }
-    delay(length + 35);
-    noTone(BUZZER_PIN);
+    delay(length);
+    silenceBuzzer();
+    delay(35);
   }
+  silenceBuzzer();
 }
 
 void happyTune() {
@@ -518,9 +542,47 @@ void markUserActivity(unsigned long now) {
   lowPowerCycleSaved = false;
 }
 
+bool overnightSleepActive() {
+  return forcedSleepMinutesLeft > 0 && pet.sleeping &&
+         screen == ACTION_SCENE && sceneAction == OVERNIGHT;
+}
+
+bool hospitalBlockedByDeepSleep() {
+  return forcedSleepMinutesLeft > 0 || postDeepSleepHospitalGraceMinutes > 0;
+}
+
+void finishForcedSleep() {
+  bool wasOvernightScene = screen == ACTION_SCENE && sceneAction == OVERNIGHT;
+  forcedSleepMinutesLeft = 0;
+  postDeepSleepHospitalGraceMinutes = POST_DEEP_SLEEP_HOSPITAL_GRACE_MINUTES;
+  overnightSelectHeldSince = 0;
+  pet.sleeping = false;
+  makeVeryHungry();
+  updateLowStatusAlerts(true);
+  if (wasOvernightScene) screen = HOME;
+  lowPowerCycleSaved = false;
+  saveGame(HOME);
+  displayDirty = true;
+}
+
+bool updateOvernightSelectWake(unsigned long now) {
+  if (!overnightSleepActive()) {
+    overnightSelectHeldSince = 0;
+    return false;
+  }
+  if (digitalRead(SELECT_PIN) != LOW) {
+    overnightSelectHeldSince = 0;
+    return false;
+  }
+  if (overnightSelectHeldSince == 0) overnightSelectHeldSince = now;
+  if (now - overnightSelectHeldSince < SELECT_HOLD_WAKE_MS) return false;
+  finishForcedSleep();
+  return true;
+}
+
 bool shouldSaveBeforeLowPower() {
   return screen == EGG || screen == HOME || screen == GROWN_UP || screen == HOSPITAL ||
-         (screen == ACTION_SCENE && sceneAction == OVERNIGHT && pet.sleeping);
+         overnightSleepActive();
 }
 
 #if defined(ARDUINO_ARCH_NRF52)
@@ -658,7 +720,7 @@ void applyLowPowerElapsed(unsigned long beforeSleep, unsigned long wokeAt) {
 }
 
 void enterLowPowerCycle(unsigned long now) {
-  bool overnightSceneCanSleep = screen == ACTION_SCENE && sceneAction == OVERNIGHT && pet.sleeping;
+  bool overnightSceneCanSleep = overnightSleepActive();
   if (activeWindowOpen(now) || displayDirty ||
       (screen == ACTION_SCENE && !overnightSceneCanSleep) ||
       screen == HATCHING) return;
@@ -668,6 +730,7 @@ void enterLowPowerCycle(unsigned long now) {
     lowPowerCycleSaved = true;
   }
 
+  silenceBuzzer();
   display.hibernate();
   platformPeripheralPowerOff();
   displayHasKnownFrame = false;
@@ -677,6 +740,7 @@ void enterLowPowerCycle(unsigned long now) {
   platformLowPowerSleep();
   unsigned long wokeAt = millis();
   applyLowPowerElapsed(beforeSleep, wokeAt);
+  silenceBuzzer();
   disableBoardIndicators();
   lastLowStatusFlash = wokeAt;
   if (anyButtonHeld()) markUserActivity(wokeAt);
@@ -851,6 +915,9 @@ bool applyLoadedSaveData(const SaveData &data) {
   virusLevel = saveVersion >= 10 && data.virusLevel <= MAX_VIRUS_LEVEL ?
       data.virusLevel : pet.sick ? 1 : 0;
   soundMuted = saveVersion >= 11 ? data.soundMuted != 0 : false;
+  postDeepSleepHospitalGraceMinutes = saveVersion >= 13 &&
+      data.postDeepSleepHospitalGraceMinutes <= POST_DEEP_SLEEP_HOSPITAL_GRACE_MINUTES ?
+      data.postDeepSleepHospitalGraceMinutes : 0;
 
   if (!pet.sick) virusLevel = 0;
   else if (virusLevel == 0) virusLevel = 1;
@@ -863,10 +930,14 @@ bool applyLoadedSaveData(const SaveData &data) {
   else if (data.stage == GROWN_UP || pet.ageDays >= PET_ADULT_DAYS) screen = GROWN_UP;
   else screen = HOME;
 
-  if (screen == EGG || screen == GROWN_UP || screen == HOSPITAL) forcedSleepMinutesLeft = 0;
+  if (screen == EGG || screen == GROWN_UP || screen == HOSPITAL) {
+    forcedSleepMinutesLeft = 0;
+    postDeepSleepHospitalGraceMinutes = 0;
+  }
   else if (forcedSleepMinutesLeft > 0 || pet.energy == 0) {
     if (forcedSleepMinutesLeft == 0) forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
     pet.sleeping = true;
+    postDeepSleepHospitalGraceMinutes = 0;
   }
 
   return true;
@@ -879,12 +950,13 @@ void saveSoundSetting() {
   data.version = SAVE_VERSION;
   data.soundMuted = soundMuted ? 1 : 0;
   data.firmwareBuildId = currentFirmwareBuildId();
+  data.postDeepSleepHospitalGraceMinutes = postDeepSleepHospitalGraceMinutes;
   writeSaveData(data);
 }
 
 void toggleSoundMute() {
   soundMuted = !soundMuted;
-  noTone(BUZZER_PIN);
+  silenceBuzzer();
   saveSoundSetting();
   if (!soundMuted) unmuteTune();
 }
@@ -895,7 +967,7 @@ void saveGame(byte stage) {
     languageChoice, SAVE_VERSION, forcedSleepMinutesLeft, awayHungerMinutes,
     waterDepleteRemainder, foodEmptyTicks, waterEmptyTicks, attentionTicks,
     recoveryBonusTicks, hospitalMinutesLeft, virusLevel, (byte)(soundMuted ? 1 : 0),
-    currentFirmwareBuildId()
+    currentFirmwareBuildId(), postDeepSleepHospitalGraceMinutes
   };
   writeSaveData(data);
 }
@@ -927,6 +999,56 @@ const __FlashStringHelper *animalName(Animal kind) {
     case PENGUIN: return F("PIPER");
     default: return F("FRIEND");
   }
+}
+
+uint16_t animalHatchWeightTenthKg(Animal kind) {
+  switch (kind) {
+    case CAT: return 2;       // 0.2 kg
+    case DOG: return 3;       // 0.3 kg
+    case BUNNY: return 1;     // 0.1 kg
+    case PANDA: return 15;    // 1.5 kg
+    case DRAGON: return 5;    // 0.5 kg
+    case FOX: return 3;       // 0.3 kg
+    case PIG: return 10;      // 1.0 kg
+    case HAMSTER: return 1;   // 0.1 kg
+    case PENGUIN: return 3;   // 0.3 kg
+    default: return 2;
+  }
+}
+
+uint16_t animalAdultWeightTenthKg(Animal kind) {
+  switch (kind) {
+    case CAT: return 42;       // 4.2 kg
+    case DOG: return 120;      // 12.0 kg
+    case BUNNY: return 25;     // 2.5 kg
+    case PANDA: return 800;    // 80.0 kg
+    case DRAGON: return 350;   // 35.0 kg
+    case FOX: return 60;       // 6.0 kg
+    case PIG: return 350;      // 35.0 kg
+    case HAMSTER: return 2;    // 0.2 kg
+    case PENGUIN: return 120;  // 12.0 kg
+    default: return 42;
+  }
+}
+
+uint16_t currentPetWeightTenthKg() {
+  uint16_t hatchWeight = animalHatchWeightTenthKg(animal);
+  uint16_t adultWeight = animalAdultWeightTenthKg(animal);
+  unsigned int age = min(pet.ageDays, PET_ADULT_DAYS);
+  int weight = hatchWeight + (long)(adultWeight - hatchWeight) * age / PET_ADULT_DAYS;
+
+  if (pet.food < LOW_NEED_VIRUS_THRESHOLD || pet.water < LOW_NEED_VIRUS_THRESHOLD) {
+    weight -= max(1, weight / 20);
+  }
+  if (pet.sick || pet.health < 50) {
+    weight -= max(1, weight / 15);
+  }
+  if (pet.food > 80 && pet.water > 70 && pet.health > 80 && pet.happy > 70) {
+    weight += max(1, weight / 30);
+  }
+
+  int maxHealthyWeight = adultWeight + max(1, adultWeight / 10);
+  return (uint16_t)constrain(weight, (int)hatchWeight, maxHealthyWeight);
 }
 
 const __FlashStringHelper *uiText(UiText text) {
@@ -980,6 +1102,10 @@ const __FlashStringHelper *uiText(UiText text) {
       case TXT_HOSPITAL_REST: return F("RUHE");
       case TXT_HOSPITAL_TIMER: return F("ZEIT");
       case TXT_LOVE_MESSAGE: return F("ICH LIEBE DICH");
+      case TXT_INFO: return F("INFO");
+      case TXT_DAYS_OLD: return F("TAGE ALT");
+      case TXT_WEIGHT: return F("GEWICHT");
+      case TXT_KG: return F("KG");
     }
   }
 
@@ -1030,6 +1156,10 @@ const __FlashStringHelper *uiText(UiText text) {
     case TXT_HOSPITAL_REST: return F("RESTING");
     case TXT_HOSPITAL_TIMER: return F("TIME LEFT");
     case TXT_LOVE_MESSAGE: return F("I LOVE YOU");
+    case TXT_INFO: return F("INFO");
+    case TXT_DAYS_OLD: return F("DAYS OLD");
+    case TXT_WEIGHT: return F("WEIGHT");
+    case TXT_KG: return F("KG");
   }
   return F("");
 }
@@ -1082,6 +1212,10 @@ const char *bgText(UiText text) {
     case TXT_HOSPITAL_REST: return "ПОЧИВКА";
     case TXT_HOSPITAL_TIMER: return "ОСТАВА";
     case TXT_LOVE_MESSAGE: return "ОБИЧАМ ТЕ";
+    case TXT_INFO: return "ИНФО";
+    case TXT_DAYS_OLD: return "ДНИ";
+    case TXT_WEIGHT: return "ТЕГЛО";
+    case TXT_KG: return "КГ";
   }
   return "";
 }
@@ -1751,6 +1885,10 @@ void printTwoDigits(unsigned int value) {
   display.print(value);
 }
 
+unsigned int hospitalDisplayHours() {
+  return (hospitalMinutesLeft + 59U) / 60U;
+}
+
 void drawHospitalBuildingBitmap() {
   drawScaledBitmap((200 - HOSPITAL_STATUS_BITMAP_WIDTH) / 2, 42,
                    FLASH_ADDRESS(HOSPITAL_STATUS_BITMAP),
@@ -1768,13 +1906,12 @@ void drawHospitalScreen() {
 }
 
 void drawHospitalTimerValue() {
-  unsigned int hours = hospitalMinutesLeft / 60;
-  byte minutes = hospitalMinutesLeft % 60;
+  unsigned int hours = hospitalDisplayHours();
   display.setTextSize(2);
   display.setCursor(70, 176);
   printTwoDigits(hours);
   display.print(':');
-  printTwoDigits(minutes);
+  printTwoDigits(0);
 }
 
 void drawHospitalTimerWindow() {
@@ -1793,48 +1930,6 @@ void drawLoveMessageScreen() {
   display.drawRoundRect(17, 23, 166, 154, 14, GxEPD_BLACK);
   drawUiCentered(TXT_LOVE_MESSAGE, 50, 2);
   drawLargeHeart(100, 112);
-}
-
-void drawDebugValue(const char *label, int value, int x, int y) {
-  display.setTextSize(1);
-  display.setCursor(x, y);
-  display.print(label);
-  display.print(':');
-  display.print(value);
-}
-
-void drawDebugFlag(const char *label, bool value, int x, int y) {
-  display.setTextSize(1);
-  display.setCursor(x, y);
-  display.print(label);
-  display.print(':');
-  display.print(value ? 'Y' : 'N');
-}
-
-void drawDebugStatsScreen() {
-  display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
-  display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
-  display.setTextSize(2);
-  display.setCursor(43, 20);
-  display.print(F("DEBUG"));
-  display.drawLine(25, 44, 175, 44, GxEPD_BLACK);
-
-  drawDebugValue("FOOD", pet.food, 18, 56);
-  drawDebugValue("WATR", pet.water, 108, 56);
-  drawDebugValue("HAP", pet.happy, 18, 72);
-  drawDebugValue("ENRG", pet.energy, 108, 72);
-  drawDebugValue("HLTH", pet.health, 18, 88);
-  drawDebugValue("LRN", pet.learning, 108, 88);
-  drawDebugValue("POOP", pet.poop, 18, 104);
-  drawDebugValue("DIRT", pet.dirty, 108, 104);
-  drawDebugValue("VIR", virusLevel, 18, 120);
-  drawDebugValue("AGE", pet.ageDays, 108, 120);
-  drawDebugValue("F0", foodEmptyTicks, 18, 136);
-  drawDebugValue("W0", waterEmptyTicks, 108, 136);
-  drawDebugValue("HOSP", hospitalMinutesLeft, 18, 152);
-  drawDebugValue("SLP", forcedSleepMinutesLeft, 108, 152);
-  drawDebugFlag("SICK", pet.sick, 18, 168);
-  drawDebugFlag("SLEEP", pet.sleeping, 108, 168);
 }
 
 void drawSetupNumber(UiText title, int value) {
@@ -1906,9 +2001,38 @@ void drawGameMenu() {
   display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
   display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
   display.setTextColor(GxEPD_BLACK);
-  drawGameMenuRow(0, 38, TXT_GAME_HIGH_LOW_MENU);
-  drawGameMenuRow(1, 86, TXT_GAME_COIN);
-  drawGameMenuRow(2, 134, TXT_GAME_SHELL);
+  drawGameMenuRow(0, 24, TXT_GAME_HIGH_LOW_MENU);
+  drawGameMenuRow(1, 66, TXT_GAME_COIN);
+  drawGameMenuRow(2, 108, TXT_GAME_SHELL);
+  drawGameMenuRow(3, 150, TXT_INFO);
+}
+
+void drawWeightValue(int x, int y) {
+  uint16_t weight = currentPetWeightTenthKg();
+  display.setTextSize(2);
+  display.setCursor(x, y);
+  display.print(weight / 10);
+  display.print('.');
+  display.print(weight % 10);
+  drawUiText(TXT_KG, x + 56, y + 4, 1);
+}
+
+void drawPetInfoScreen() {
+  display.drawRoundRect(6, 6, 188, 188, 12, GxEPD_BLACK);
+  display.drawRoundRect(10, 10, 180, 180, 10, GxEPD_BLACK);
+  drawUiCentered(TXT_INFO, 18, 2);
+  drawAnimalScaled(100, 76, animal, idleAnimationFrame, 64);
+  display.drawLine(32, 111, 168, 111, GxEPD_BLACK);
+
+  drawUiText(TXT_DAYS_OLD, 28, 124, 1);
+  display.setTextSize(2);
+  display.setCursor(112, 120);
+  display.print(pet.ageDays);
+  display.print('/');
+  display.print(PET_ADULT_DAYS);
+
+  drawUiText(TXT_WEIGHT, 28, 156, 1);
+  drawWeightValue(112, 152);
 }
 
 void drawMiniGameFrame(UiText title) {
@@ -2099,7 +2223,7 @@ bool screenSupportsPartial(Screen currentScreen) {
     case GAME_PLAY:
     case OPTIONS:
     case HOSPITAL:
-    case DEBUG_STATS:
+    case PET_INFO:
       return true;
     default:
       return false;
@@ -2137,7 +2261,7 @@ void drawCurrentScreen() {
   else if (screen == GROWN_UP) drawGrownUpScreen();
   else if (screen == HOSPITAL) drawHospitalScreen();
   else if (screen == LOVE_MESSAGE) drawLoveMessageScreen();
-  else if (screen == DEBUG_STATS) drawDebugStatsScreen();
+  else if (screen == PET_INFO) drawPetInfoScreen();
 }
 
 bool canUsePartialRefresh() {
@@ -2268,28 +2392,9 @@ void startEgg() {
   hatchMinutesLeft = random(120, 301);
   screen = EGG;
   eggFrame = 0;
-  workShortcutRightCount = 0;
-  workShortcutLeftCount = 0;
-  resetDebugShortcut();
-  resetTestShortcut();
   saveGame(EGG);
   happyTune();
   displayDirty = true;
-}
-
-void resetWorkShortcut() {
-  workShortcutRightCount = 0;
-  workShortcutLeftCount = 0;
-}
-
-void resetTestShortcut() {
-  testShortcutRightCount = 0;
-  testShortcutLeftCount = 0;
-}
-
-void resetDebugShortcut() {
-  debugShortcutLeftCount = 0;
-  debugShortcutRightCount = 0;
 }
 
 void enterGrownUpScreen() {
@@ -2302,9 +2407,6 @@ void enterGrownUpScreen() {
   resetAttentionTimer();
   resetRecoveryBonus();
   screen = GROWN_UP;
-  resetWorkShortcut();
-  resetTestShortcut();
-  resetDebugShortcut();
   saveGame(GROWN_UP);
   displayDirty = true;
   grownUpTune();
@@ -2560,6 +2662,8 @@ void updateEmptyNeedSurvival() {
 void startForcedSleep() {
   if (screen == EGG || screen == GROWN_UP || screen == HOSPITAL) return;
   forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
+  postDeepSleepHospitalGraceMinutes = 0;
+  overnightSelectHeldSince = 0;
   pet.sleeping = true;
   screen = HOME;
   resetAwayHungerTimer();
@@ -2568,6 +2672,7 @@ void startForcedSleep() {
 }
 
 void recoverFromHospital() {
+  hospitalMuteExitCount = 0;
   hospitalMinutesLeft = 0;
   pet.food = max(pet.food, HOSPITAL_RECOVER_FOOD);
   pet.water = max(pet.water, HOSPITAL_RECOVER_WATER);
@@ -2580,12 +2685,13 @@ void recoverFromHospital() {
   virusLevel = 0;
   pet.sleeping = false;
   forcedSleepMinutesLeft = 0;
+  postDeepSleepHospitalGraceMinutes = 0;
+  overnightSelectHeldSince = 0;
   waterDepleteRemainder = 0;
   resetAwayHungerTimer();
   resetEmptyNeedTimers();
   resetAttentionTimer();
   resetRecoveryBonus();
-  resetTestShortcut();
   screen = HOME;
   lowStatusAlertMask = currentLowStatusMask();
   lowStatusFlashOn = false;
@@ -2595,6 +2701,8 @@ void recoverFromHospital() {
 
 void enterHospital() {
   if (screen == EGG || screen == GROWN_UP || screen == HOSPITAL) return;
+  if (hospitalBlockedByDeepSleep()) return;
+  hospitalMuteExitCount = 0;
   hospitalMinutesLeft = HOSPITAL_MINUTES;
   pet.health = 0;
   pet.happy = 0;
@@ -2602,18 +2710,34 @@ void enterHospital() {
   forcedSleepMinutesLeft = 0;
   resetAwayHungerTimer();
   resetRecoveryBonus();
-  resetTestShortcut();
   screen = HOSPITAL;
   saveGame(HOSPITAL);
   displayDirty = true;
   hospitalTune();
 }
 
+void handleHospitalMuteShortcut() {
+  if (screen != HOSPITAL) {
+    hospitalMuteExitCount = 0;
+    return;
+  }
+  if (hospitalMuteExitCount < HOSPITAL_EXIT_MUTE_PRESSES) hospitalMuteExitCount++;
+  if (hospitalMuteExitCount >= HOSPITAL_EXIT_MUTE_PRESSES) {
+    recoverFromHospital();
+  }
+}
+
 void updateHospitalTimer() {
   if (screen != HOSPITAL) return;
+  unsigned int previousDisplayHours = hospitalDisplayHours();
   if (hospitalMinutesLeft > 0) hospitalMinutesLeft--;
   if (hospitalMinutesLeft == 0) {
     recoverFromHospital();
+    return;
+  }
+  if (hospitalDisplayHours() != previousDisplayHours) {
+    saveGame(HOSPITAL);
+    displayDirty = true;
   }
 }
 
@@ -2636,18 +2760,13 @@ void advanceClock() {
   if (screen == HOSPITAL) {
     updateHospitalTimer();
   } else {
+    if (postDeepSleepHospitalGraceMinutes > 0) postDeepSleepHospitalGraceMinutes--;
     updateAwayHunger();
     if (forcedSleepMinutesLeft > 0) {
       forcedSleepMinutesLeft--;
       pet.sleeping = true;
       if (forcedSleepMinutesLeft == 0) {
-        bool wasOvernightScene = screen == ACTION_SCENE && sceneAction == OVERNIGHT;
-        pet.sleeping = false;
-        makeVeryHungry();
-        updateLowStatusAlerts(true);
-        if (wasOvernightScene) screen = HOME;
-        saveGame(HOME);
-        displayDirty = true;
+        finishForcedSleep();
       }
     }
   }
@@ -2670,7 +2789,8 @@ void advanceClock() {
 }
 
 void updateNeeds() {
-  if (screen != HOME && screen != ACTION_SCENE && screen != GAME_MENU && screen != GAME_PLAY) return;
+  if (screen != HOME && screen != ACTION_SCENE && screen != GAME_MENU &&
+      screen != GAME_PLAY && screen != PET_INFO) return;
   if (pet.sleeping) {
     pet.energy = clampStat(pet.energy + 8);
     spendFood(2);
@@ -2729,6 +2849,11 @@ void rewardMiniGame(bool won) {
 }
 
 void startMiniGame(byte choice) {
+  if (choice == GAME_INFO) {
+    screen = PET_INFO;
+    displayDirty = true;
+    return;
+  }
   activeGame = (MiniGame)choice;
   miniGamePhase = MINI_GAME_PICK;
   miniGameWon = false;
@@ -2766,14 +2891,12 @@ void exitMiniGame() {
 
 void performAction(Action action) {
   if (action == PLAY) {
-    resetWorkShortcut();
     gameChoice = 0;
     screen = GAME_MENU;
     displayDirty = true;
     return;
   }
   if (action == SETTINGS) {
-    resetWorkShortcut();
     editField = 0;
     screen = OPTIONS;
     displayDirty = true;
@@ -2802,6 +2925,8 @@ void performAction(Action action) {
       break;
     case OVERNIGHT:
       forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
+      postDeepSleepHospitalGraceMinutes = 0;
+      overnightSelectHeldSince = 0;
       pet.sleeping = true;
       pet.energy = 100;
       makeVeryHungry();
@@ -2836,124 +2961,6 @@ void performAction(Action action) {
   animateAction(action);
 }
 
-bool handleWorkShortcut(bool left, bool select, bool right) {
-  if (select || (left && right)) {
-    resetWorkShortcut();
-    return false;
-  }
-  if (right) {
-    if (workShortcutLeftCount > 0) {
-      workShortcutRightCount = 1;
-      workShortcutLeftCount = 0;
-    } else if (workShortcutRightCount < WORK_SHORTCUT_PRESSES) {
-      workShortcutRightCount++;
-    }
-    return false;
-  }
-  if (left) {
-    if (workShortcutRightCount >= WORK_SHORTCUT_PRESSES) {
-      workShortcutLeftCount++;
-      if (workShortcutLeftCount >= WORK_SHORTCUT_PRESSES) {
-        enterGrownUpScreen();
-        return true;
-      }
-    } else {
-      resetWorkShortcut();
-    }
-  }
-  return false;
-}
-
-void enterDebugStatsScreen() {
-  resetDebugShortcut();
-  resetTestShortcut();
-  resetWorkShortcut();
-  screen = DEBUG_STATS;
-  displayDirty = true;
-}
-
-bool handleDebugShortcut(bool left, bool select, bool right) {
-  if (select || (left && right)) {
-    resetDebugShortcut();
-    return false;
-  }
-
-  if (left) {
-    if (debugShortcutRightCount > 0) {
-      debugShortcutLeftCount = 1;
-      debugShortcutRightCount = 0;
-    } else if (debugShortcutLeftCount < DEBUG_SHORTCUT_PRESSES) {
-      debugShortcutLeftCount++;
-    }
-    return false;
-  }
-
-  if (right) {
-    if (debugShortcutLeftCount >= DEBUG_SHORTCUT_PRESSES) {
-      if (debugShortcutRightCount < DEBUG_SHORTCUT_PRESSES) debugShortcutRightCount++;
-      if (debugShortcutRightCount >= DEBUG_SHORTCUT_PRESSES) {
-        enterDebugStatsScreen();
-        return true;
-      }
-    } else {
-      resetDebugShortcut();
-    }
-  }
-
-  return false;
-}
-
-void showAllStatusOverlays() {
-  pet.poop = 3;
-  pet.dirty = DIRTY_FULL_THRESHOLD;
-  pet.sick = true;
-  virusLevel = MAX_VIRUS_LEVEL;
-  pet.health = max(pet.health, (byte)HOSPITAL_RECOVER_HEALTH);
-  if (pet.happy > DIRTY_FULL_HAPPY_LIMIT) pet.happy = DIRTY_FULL_HAPPY_LIMIT;
-  applyEmptyNeedMood();
-  screen = HOME;
-  saveGame(HOME);
-  displayDirty = true;
-  badStatusTune();
-}
-
-bool handleTestShortcut(bool left, bool select, bool right) {
-  if (select || (left && right)) {
-    resetTestShortcut();
-    return false;
-  }
-
-  if (right) {
-    testShortcutLeftCount = 0;
-    if (testShortcutRightCount < TEST_SHORTCUT_PRESSES) testShortcutRightCount++;
-    if (testShortcutRightCount >= TEST_SHORTCUT_PRESSES) {
-      resetTestShortcut();
-      if (screen == HOSPITAL) {
-        hospitalMinutesLeft = 1;
-        saveGame(HOSPITAL);
-        displayDirty = true;
-      } else if (screen == HOME) {
-        enterHospital();
-      }
-      return true;
-    }
-  } else if (left) {
-    testShortcutRightCount = 0;
-    if (screen == HOME) {
-      if (testShortcutLeftCount < TEST_SHORTCUT_PRESSES) testShortcutLeftCount++;
-      if (testShortcutLeftCount >= TEST_SHORTCUT_PRESSES) {
-        resetTestShortcut();
-        showAllStatusOverlays();
-        return true;
-      }
-    } else {
-      testShortcutLeftCount = 0;
-    }
-  }
-
-  return false;
-}
-
 void changeSetupValue(int direction) {
   if (screen == LANGUAGE) {
     languageChoice = (languageChoice + 3 + direction) % 3;
@@ -2968,16 +2975,8 @@ void changeSetupValue(int direction) {
 
 void handleButtons(bool left, bool select, bool right) {
   if (left || select || right) resetAwayHungerTimer();
-  if (screen != HOME && (left || select || right)) resetWorkShortcut();
   if (screen == LOVE_MESSAGE) {
     if (left || select || right) dismissLoveMessage();
-    return;
-  }
-  if (screen == DEBUG_STATS) {
-    if (left || select || right) {
-      screen = HOME;
-      displayDirty = true;
-    }
     return;
   }
   if (screen == LANGUAGE) {
@@ -3017,7 +3016,6 @@ void handleButtons(bool left, bool select, bool right) {
     return;
   }
   if (screen == HOSPITAL) {
-    if (handleTestShortcut(left, select, right)) return;
     return;
   }
   if (screen == EGG) {
@@ -3036,9 +3034,6 @@ void handleButtons(bool left, bool select, bool right) {
     return;
   }
   if (screen == HOME) {
-    if (handleDebugShortcut(left, select, right)) return;
-    if (handleTestShortcut(left, select, right)) return;
-    if (handleWorkShortcut(left, select, right)) return;
     Action previousAction = selectedAction;
     if (left) selectedAction = (Action)((selectedAction + SETTINGS - 1) % SETTINGS);
     if (right) selectedAction = (Action)((selectedAction + 1) % SETTINGS);
@@ -3051,6 +3046,11 @@ void handleButtons(bool left, bool select, bool right) {
     if (sceneAction == OVERNIGHT && pet.sleeping) return;
     screen = HOME;
     displayDirty = true;
+  } else if (screen == PET_INFO) {
+    if (select) {
+      screen = GAME_MENU;
+      displayDirty = true;
+    }
   } else if (screen == GAME_MENU) {
     if (left) { gameChoice = (gameChoice + MINI_GAME_COUNT - 1) % MINI_GAME_COUNT; displayDirty = true; }
     if (right) { gameChoice = (gameChoice + 1) % MINI_GAME_COUNT; displayDirty = true; }
@@ -3092,6 +3092,7 @@ void setup() {
   pinMode(RIGHT_PIN, INPUT_PULLUP);
   pinMode(MUTE_PIN, INPUT_PULLUP);
   pinMode(BUZZER_PIN, OUTPUT);
+  silenceBuzzer();
   platformHardwareInit();
   platformPeripheralPowerOn();
   configureDisplaySpiPins();
@@ -3119,8 +3120,6 @@ void setup() {
   lowStatusAlertMask = currentLowStatusMask();
   lowStatusFlashOn = false;
   lowPowerCycleSaved = false;
-  startupShortcutArmed = true;
-  startupSelectHeldSince = 0;
   eggSelectCount = 0;
   refreshDisplay();
 }
@@ -3128,27 +3127,9 @@ void setup() {
 void loop() {
   unsigned long now = millis();
   if (anyButtonHeld()) markUserActivity(now);
-
-  if (startupShortcutArmed && (screen == LANGUAGE || screen == SET_CLOCK)) {
-    if (digitalRead(SELECT_PIN) == LOW) {
-      if (startupSelectHeldSince == 0) startupSelectHeldSince = now;
-      if (now - startupSelectHeldSince >= 1000UL) {
-        startupShortcutArmed = false;
-        startupSelectHeldSince = 0;
-        animalChoice = animal;
-        editField = 0;
-        screen = SELECT_ANIMAL;
-        displayDirty = true;
-        refreshDisplay();
-        return;
-      }
-      return;
-    } else if (startupSelectHeldSince != 0) {
-      startupShortcutArmed = false;
-      startupSelectHeldSince = 0;
-      handleButtons(false, true, false);
-      return;
-    }
+  if (updateOvernightSelectWake(now)) {
+    if (displayDirty) refreshDisplay();
+    return;
   }
 
   bool left = pressed(leftButton);
@@ -3157,8 +3138,13 @@ void loop() {
   bool mute = pressed(muteButton);
   if (mute) {
     resetAwayHungerTimer();
-    if (screen == LOVE_MESSAGE) dismissLoveMessage();
-    toggleSoundMute();
+    if (screen == HOSPITAL) {
+      handleHospitalMuteShortcut();
+    } else {
+      hospitalMuteExitCount = 0;
+      if (screen == LOVE_MESSAGE) dismissLoveMessage();
+      toggleSoundMute();
+    }
   }
   if (left || select || right) handleButtons(left, select, right);
   if (left || select || right || mute) markUserActivity(millis());
@@ -3171,7 +3157,6 @@ void loop() {
     if (screen == EGG && hatchMinutesLeft == 0) animateEggHatch();
     checkAgeLimit();
     if (gameClock.minute == 0) saveGame(currentSaveStage());
-    if (screen == HOSPITAL) displayDirty = true;
   }
   if (now - lastNeedsTick >= NEEDS_TICK_MS) {
     lastNeedsTick = now;
