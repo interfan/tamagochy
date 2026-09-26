@@ -3,10 +3,18 @@
 An Arduino-style virtual pet firmware with hand-drawn 1-bit animal art, care
 actions, mini games, sounds, persistent saves, and a Wokwi preview build.
 
-The current simulator target is an ESP32 DevKit with an ILI9341 LCD preview.
-The physical display path uses a 1.54-inch black/white e-paper driver. The
-planned final hardware work is nRF52840 plus e-ink, but the real nRF52840 sleep
-and board pin mapping still need final integration.
+The repository contains two separate firmware sketches:
+
+- [`Tamagochi.ino`](Tamagochi.ino): ESP32 DevKit / Wokwi with an ILI9341 LCD
+  preview, plus a legacy non-Wokwi e-paper path.
+- [`output/TamagochiNrfEink`](output/TamagochiNrfEink/README.md): physical
+  nice!nano / Pro Micro-compatible nRF52840 with a 1.54-inch black/white
+  e-paper display. Board pin mapping, RTC2/GPIO wake, System ON sleep, and
+  partial display refresh are implemented here.
+
+The sketches share most gameplay and bitmap assets but have different sleep,
+sound, save, and display behavior. Hardware-specific differences are called
+out below. The `output` sketch is maintained separately from the root sketch.
 
 ## Current Features
 
@@ -16,7 +24,10 @@ and board pin mapping still need final integration.
 - English, Bulgarian, and German UI text
 - Bulgarian uses Cyrillic font rendering
 - Mute button with persisted sound setting
-- Robust two-slot save system with CRC and sequence number
+- Two-slot save records with CRC and sequence number; storage limitations below
+- Hardware-only pet information screen with age and calculated weight
+- Hardware-only sleep until the user wakes the pet, with hospital protection
+  during deep sleep and for one hour afterward
 - Automated bitmap validation before Wokwi builds
 - Low-power Wokwi preview loop: active for 60 seconds after input, then 60-second wake checks
 - Wokwi build script that enforces a 1 MiB no-Bluetooth nRF52840-style flash budget
@@ -29,6 +40,11 @@ and board pin mapping still need final integration.
 | Select | Confirm / perform action |
 | Right | Next action / next menu item |
 | Mute | Toggle sound on/off |
+
+In the hardware build, Mute is repurposed while in hospital: 12 presses recover
+the pet immediately. Holding Select for 5 seconds wakes the pet from Overnight
+or exhaustion sleep, including after restarting the same firmware. See the
+hardware README for its separate pin map.
 
 Wokwi pins:
 
@@ -90,8 +106,8 @@ On first start:
 3. Choose an animal.
 4. Wait for the egg to hatch.
 
-The egg hatches after a random 2 to 5 hours. In Wokwi, pressing Select three
-times quickly on the egg screen forces hatching.
+The egg hatches after a random 2 to 5 hours. In both builds, pressing Select
+three times with no more than 700 ms between presses forces hatching.
 
 Home screen meters:
 
@@ -130,6 +146,23 @@ Play opens a mini-game menu:
 - Coin Toss
 - Shell Game
 
+A win adds 20 happiness and a loss adds 5; either result costs 8 food and
+8 energy. The hardware build adds an Info entry showing age out of 25 days
+and weight calculated from species, age, and current condition.
+
+Excellent care triggers an "I love you" screen and melody: the pet must be
+awake, clean, free of poop and sickness/viruses, have food/water/energy above
+50, and happiness at 100. The message closes after 60 seconds or button input.
+
+Reading increases learning, but learning currently has no unlocks or other
+gameplay effects. Settings code exists for changing the clock and starting a
+new egg, but normal HOME navigation excludes the Settings action, so that menu
+is currently unreachable.
+
+The clock advances from firmware timers and resumes from its saved value after
+a restart. Elapsed time while completely powered off is not recovered. The
+DS3231 in `diagram.json` is not read by the firmware.
+
 ## Stat Logic
 
 Needs update every 20 minutes.
@@ -141,7 +174,8 @@ Normal awake drain:
 - Happiness: `-3` per needs tick
 - Energy: `-3` per needs tick
 
-Approximate drain from 100 to 0:
+Approximate base drain from 100 to 0, excluding actions and the extra away
+hunger penalty:
 
 | Stat | Time |
 | --- | --- |
@@ -154,21 +188,33 @@ When sleeping:
 - Food drains more slowly
 - Water still drains
 
-If energy reaches 0, the pet is forced to sleep for 12 hours.
+If energy reaches 0, the hardware build sleeps until the user holds Select for
+5 seconds. The root/Wokwi build still uses 12-hour forced sleep.
+
+The manual Overnight action differs between builds:
+
+- Hardware: sets energy to 100, reduces food to at most 20, and remains asleep
+  until Select is held for 5 seconds. There is no automatic wake after 12 hours.
+  Exhaustion uses the same sleep scene and manual wake control. Short presses
+  and Left/Right do not perform care actions during deep sleep; Mute still works.
+  The sleep state is saved and restored. Age still advances, but the grown-up
+  ending is deferred until the user wakes the pet. Nap remains a separate toggle.
+- Root/Wokwi: sets sleeping, energy to 100, and food to at most 20, but does not
+  start a new 12-hour timer. Its timed forced sleep is triggered by exhaustion.
 
 If food is 0:
 
 - Happiness becomes 0
-- Power drains faster
+- Energy drains faster while awake
 - Health reaches hospital threshold after about 5 hours
 
 If water is 0:
 
 - Happiness becomes 0
-- Power drains faster
+- Energy drains faster while awake
 - Health reaches hospital threshold after about 3 hours
 
-Every 4 hours away from care:
+Every 4 hours without button interaction while awake:
 
 - Food loses `18`
 
@@ -179,7 +225,8 @@ Dirty behavior:
 - Cleaning poop increases dirty
 - Random dirt can appear over time
 - Dirty at 50% lowers happiness
-- Dirty at 100% limits happiness to 20
+- Adding dirt at 100% caps happiness at 20 at that moment; subsequent care can
+  raise happiness again
 
 Virus chance increases from:
 
@@ -193,7 +240,27 @@ temporary recovery bonus that softens sickness risk.
 
 ## Hospital
 
-The pet enters hospital if health reaches 0.
+The pet enters hospital when a needs update detects health at 0, subject to
+the hardware build's sleep protection below.
+
+### Protection during deep sleep and after waking (hardware build only)
+
+`hospitalBlockedByDeepSleep()` blocks admission whenever
+`deepSleepAwaitingWake` is set or `postDeepSleepHospitalGraceMinutes > 0`.
+When the user wakes the pet, `wakeFromDeepSleep()` sets the grace counter to
+`POST_DEEP_SLEEP_HOSPITAL_GRACE_MINUTES`, currently **60 game minutes**.
+This applies to both exhaustion sleep and the manual Overnight action. The
+counter starts on manual wake, decreases once per game minute, and is included
+in saved state. Passing 12 hours alone never starts the grace countdown.
+
+The protection delays hospital admission; needs and health can still fall
+during sleep and the grace period. Waking does not restore health. Use the
+hour to restore food/water and, if needed, health with Medicine or Bath.
+Once the counter expires, a subsequent needs update can admit a pet whose
+health is still 0. An ordinary Nap does not grant this grace period.
+
+The root/Wokwi sketch has neither the hospital-admission guard nor the
+post-sleep grace counter, so it can enter hospital during or after sleep.
 
 Hospital duration:
 
@@ -206,6 +273,8 @@ While in hospital:
 - Animal is inactive
 - Timer is shown
 - Wokwi low-power loop still wakes every minute to refresh the timer
+- Hardware counts down every minute but displays remaining hours rounded up;
+  its timer display changes once per hour
 
 After recovery:
 
@@ -234,6 +303,10 @@ Wokwi shortcut:
 
 ## Test Shortcuts
 
+The HOME and Hospital shortcuts in the following tables are for the root
+sketch. The hardware build instead has the 12-Mute-press hospital recovery
+shortcut described under Controls.
+
 From Home:
 
 | Shortcut | Result |
@@ -250,7 +323,7 @@ From Hospital:
 
 ## Save System
 
-The firmware uses robust dual-slot saving.
+Both sketches use two logical save slots.
 
 Each save record contains:
 
@@ -259,11 +332,21 @@ Each save record contains:
 - Save data
 - CRC32
 
-There are two save slots. Each new save writes to the opposite slot. On boot,
-the firmware loads the newest valid slot. If power fails during a write and the
-new slot has a bad CRC, the previous slot is still valid.
+Each new record targets the opposite slot. On boot, the firmware selects the
+newest record with a valid header and CRC. A damaged record can be skipped if
+the other record remains intact; this does not by itself guarantee that the
+underlying storage preserves one slot during power loss.
 
-Legacy single-slot saves are migrated automatically on first load.
+The root sketch includes legacy single-slot migration. The hardware loader
+requires the current save version and matching firmware build ID. Its build
+script generates a new ID each build, so installing a newly built firmware
+returns to initial setup instead of resuming the previous pet.
+
+Hardware storage uses a 512-byte LittleFS file, `/tamagochi.sav`, containing
+both slots. `NrfSaveStorage::commit()` deletes this file before rewriting it;
+the slots are not independent files, so power-loss-safe replacement remains
+an improvement to implement. The write verification reads the RAM buffer and
+does not confirm that the file was successfully persisted.
 
 Saved state includes:
 
@@ -273,7 +356,7 @@ Saved state includes:
 - Current stage
 - Egg hatch timer
 - Language
-- Forced sleep timer
+- Root forced-sleep timer / hardware sleep-until-woken state
 - Away hunger timer
 - Empty food/water survival timers
 - Attention timer
@@ -281,6 +364,7 @@ Saved state includes:
 - Hospital timer
 - Virus level
 - Mute setting
+- Hardware-only firmware build ID and post-sleep hospital grace counter
 
 ## Low Power
 
@@ -290,14 +374,15 @@ Current Wokwi behavior:
 - After that, ESP32 light sleep is used in Wokwi.
 - It wakes every 60 seconds to check timers/events.
 - Buttons can wake it.
-- Display is hibernated after refresh.
+- The shared code calls display hibernation after refresh, but the Wokwi LCD
+  adapter implements it as a no-op.
 - Idle pet animation and low-status flashing stop outside the active window.
 
-Important:
-
-The Wokwi sleep code is ESP32-specific preview code. Real nRF52840 hardware
-still needs a proper System ON sleep implementation with RTC wake and GPIO
-button wake.
+The Wokwi sleep code is ESP32-specific preview code. The separate hardware
+sketch implements nRF52840 System ON sleep with RTC2 wake every 60 seconds,
+GPIO button wake, display hibernation, and peripheral power switching.
+Its 60-second active window is separate from the pet's sleep state; periodic
+MCU wake checks do not wake a sleeping pet.
 
 ## Display Notes
 
@@ -307,8 +392,68 @@ Wokwi uses ILI9341 as a fast visual preview. Real e-paper behaves differently:
 - It consumes meaningful power mostly during refresh.
 - Frequent refreshes can cause ghosting and visible flashing.
 
-For final e-paper hardware, avoid frequent idle animation refreshes. Keep action
-animations after user input, then return to a clean home refresh.
+The hardware build currently animates HOME every 10 seconds during the active
+window, then stops idle animation when inactive. Low-status flashing is
+disabled there; the Wokwi build enables flashing and uses a 6-second idle
+animation interval. The hardware build uses partial refreshes where possible;
+see its README for the full/partial refresh rules.
+
+## Battery Monitoring
+
+The **nRF52840 hardware build** now checks the internal VDDH/5 input at
+startup and approximately every minute while running on battery. This assumes
+BAT+ supplies VDDH on the actual board. USB-powered readings are skipped.
+
+At an estimated 40%, a dismissible **BATTERY / 40%** screen appears. At 20%,
+it shows **BATTERY / 20% / PLEASE CHARGE**. Any of the four buttons dismisses
+it without also performing its usual action. The 20% warning takes priority
+if the battery is already low at boot. Alerts do not repeat until charge rises
+above the threshold plus a 5-point margin, or the device restarts. Game timers
+continue, and dismissing an alert does not wake a deeply sleeping pet.
+
+The provisional 3.7 V single-cell Li-ion curve uses approximately 3.80 V for
+40% and 3.70 V for 20%. It needs calibration against the exact Nokia battery
+model; the stated "3.7-4.4 V" range is not enough to determine state of charge.
+See [hardware battery monitoring](output/TamagochiNrfEink/README.md#battery-monitoring)
+for wiring assumptions, ADC settings, USB behavior, and validation steps.
+
+The root/Wokwi build still has no battery monitor. There is no battery melody
+or battery-triggered shutdown. The HOME energy meter measures pet energy.
+
+## Melodies and Sound Effects
+
+Both sketches define the same nine non-empty melodies. The frequencies below
+are the base values in the note arrays; each note is followed by a 35 ms gap.
+
+| Function | Base notes (Hz) | Where it plays |
+| --- | --- | --- |
+| `hatchTune()` | 523, 523, 587, 523, 698, 659 | At the end of egg hatching |
+| `deepSleepTune()` | 523, 523, 784, 784, 880, 880, 784 | When the player chooses Overnight; not when exhaustion automatically starts sleep |
+| `coinTune()` | 1175, 1568 | Normal care-action confirmation, unless a status alert takes priority; not specifically a Coin Toss reward |
+| `unmuteTune()` | 880, 1175 | When sound is switched back on |
+| `badStatusTune()` | 587, 554, 587, 494 | Newly low food/water/happiness/energy, dirt threshold crossings, new poop, or new/worsening illness; also the root status-overlay test shortcut |
+| `hospitalTune()` | 784, 523, 784, 523, 784, 523 | On entering hospital |
+| `loveTune()` | 784, 988, 1175, 1568, 1175 | When the excellent-care love message appears |
+| `lifeUpTune()` | 659, 784, 988, 1319, 1568, 1760 | Winning any mini-game, unless that round triggers a low-status alert |
+| `grownUpTune()` | 659, 659, 698, 784, 784, 698, 659, 587, 523, 523, 587, 659, 659, 587, 587 | On reaching the grown-up ending |
+
+`happyTune()` is called when a new egg starts, but its body is empty in both
+sketches, so it produces no sound.
+
+The hardware build also plays short `chirp()` effects:
+
+- HOME action selection: 900 Hz for 25 ms.
+- Four care-animation frames: 650, 830, 1010, 1190 Hz, each for 70 ms.
+- Four hatching frames: 500, 680, 860, 1040 Hz, each for 160 ms.
+- A lost mini-game: 300 Hz for 160 ms, unless a low-status alert takes priority.
+
+The root sketch's `chirp()` is an empty stub, so these short effects are silent
+in Wokwi; the named melodies still play. Hardware maps all base frequencies
+into the 2000-4000 Hz range through `loudBuzzerFrequency()`, so its pitch differs
+from Wokwi. Sound is globally muted by `soundMuted`, and the preference is
+saved. Overnight can play its melody followed by a status alert, and hardware
+care-animation chirps follow the action melody/alert. There is no background
+music, battery melody, or separate wake-up/recovery melody.
 
 ## Hardware Notes
 
@@ -370,6 +515,8 @@ assets/pixel-final
 
 - Split the large sketch into modules.
 - Add simulation tests for stat drain, hospital, grown-up transition, and save recovery.
-- Add final nRF52840 sleep implementation.
-- Add final battery voltage monitor once the final power path and ADC pin are chosen.
+- Keep the root and hardware gameplay behavior aligned, especially sleep protection.
+- Make Settings reachable through normal navigation.
+- Make hardware save replacement safe across power loss and preserve saves across builds.
+- Validate the hardware VDDH battery reading and calibrate the discharge curve for the exact Nokia cell.
 - Reduce real e-paper refresh frequency for final hardware.

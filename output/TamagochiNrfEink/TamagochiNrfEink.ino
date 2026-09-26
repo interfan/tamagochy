@@ -26,6 +26,7 @@
 #include <nrf.h>
 #include <nrf_gpio.h>
 #endif
+#include "battery_monitor.h"
 #include "companion_bitmaps.h"
 #include "animal_idle_variants.h"
 #include "action_icons.h"
@@ -99,6 +100,9 @@ typedef uintptr_t FlashAddress;
 #define NICE_NANO_VCC_SWITCH_NRF_PIN 13
 #endif
 
+const unsigned long BATTERY_CHECK_MS = 60000UL;
+const unsigned long BATTERY_UNPLUG_SETTLE_MS = 5000UL;
+const byte BATTERY_SAMPLE_COUNT = 8;
 const unsigned long DEBOUNCE_MS = 35;
 const unsigned long CLOCK_TICK_MS = 60000UL;
 const unsigned long NEEDS_TICK_MS = 20UL * 60000UL;
@@ -169,7 +173,6 @@ class NrfSaveStorage {
 
 NrfSaveStorage EEPROM;
 const unsigned int PET_ADULT_DAYS = 25;
-const unsigned int FORCED_SLEEP_MINUTES = 12U * 60U;
 const unsigned int HOSPITAL_MINUTES = 24U * 60U;
 const unsigned int POST_DEEP_SLEEP_HOSPITAL_GRACE_MINUTES = 60U;
 const unsigned long SELECT_HOLD_WAKE_MS = 5UL * 1000UL;
@@ -260,7 +263,8 @@ enum UiText : byte {
   TXT_FIND_BALL, TXT_MOVE, TXT_FOUND_20, TXT_EMPTY_5,
   TXT_GROWN_TITLE, TXT_GROWN_DAY, TXT_GROWN_WORK,
   TXT_HOSPITAL_TITLE, TXT_HOSPITAL_REST, TXT_HOSPITAL_TIMER,
-  TXT_LOVE_MESSAGE, TXT_INFO, TXT_DAYS_OLD, TXT_WEIGHT, TXT_KG
+  TXT_LOVE_MESSAGE, TXT_INFO, TXT_DAYS_OLD, TXT_WEIGHT, TXT_KG,
+  TXT_BATTERY, TXT_PLEASE_CHARGE, TXT_PRESS_ANY_BUTTON
 };
 
 struct Button {
@@ -308,7 +312,8 @@ struct SaveData {
   unsigned int hatchMinutesLeft;
   byte language;
   byte version;
-  unsigned int forcedSleepMinutesLeft;
+  // Keep the legacy timer's size/layout: any saved nonzero value means asleep.
+  unsigned int deepSleepAwaitingWake;
   unsigned int awayHungerMinutes;
   byte waterDepleteRemainder;
   byte foodEmptyTicks;
@@ -359,7 +364,7 @@ unsigned long lastNeedsTick = 0;
 unsigned long lastEggFrame = 0;
 unsigned long lastIdleAnimation = 0;
 byte idleAnimationFrame = 0;
-unsigned int forcedSleepMinutesLeft = 0;
+bool deepSleepAwaitingWake = false;
 unsigned int awayHungerMinutes = 0;
 byte waterDepleteRemainder = 0;
 byte foodEmptyTicks = 0;
@@ -371,8 +376,16 @@ byte virusLevel = 0;
 byte lowStatusAlertMask = 0;
 bool lowStatusFlashOn = false;
 unsigned long lastLowStatusFlash = 0;
-unsigned long overnightSelectHeldSince = 0;
+unsigned long sleepSelectHeldSince = 0;
 unsigned int postDeepSleepHospitalGraceMinutes = 0;
+BatteryAlertState batteryAlerts;
+unsigned long lastBatteryCheck = 0;
+bool batteryCheckStarted = false;
+bool batteryUsbWasPresent = false;
+bool batteryWaitingAfterUsb = false;
+byte batteryWarningPercent = 0;
+bool batteryWarningNeedsRefresh = false;
+bool batteryWaitForRelease = false;
 bool displayDirty = true;
 bool displayHasKnownFrame = false;
 Screen lastRenderedScreen = SET_CLOCK;
@@ -533,6 +546,93 @@ bool anyButtonHeld() {
          digitalRead(MUTE_PIN) == LOW;
 }
 
+bool batteryUsbPresent() {
+#if defined(ARDUINO_ARCH_NRF52)
+  return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+#else
+  return false;
+#endif
+}
+
+void initBatteryMonitor() {
+#if defined(ARDUINO_ARCH_NRF52)
+  analogReadResolution(12);
+  analogReference(AR_INTERNAL_1_2);
+  analogSampleTime(40);  // VDDHDIV5 needs at least 10 us acquisition time.
+  analogOversampling(8);
+  analogCalibrateOffset();
+#endif
+}
+
+uint16_t readBatteryMillivolts() {
+#if defined(ARDUINO_ARCH_NRF52) && defined(SAADC_CH_PSELP_PSELP_VDDHDIV5)
+  // BAT+ must feed VDDH on this board. USB power makes this input unsuitable.
+  if (batteryUsbPresent()) return 0;
+  analogReadVDDHDIV5();  // Discard the first conversion after a long idle period.
+  uint32_t sum = 0;
+  for (byte i = 0; i < BATTERY_SAMPLE_COUNT; ++i) sum += analogReadVDDHDIV5();
+  if (batteryUsbPresent()) return 0;
+  return batteryMillivoltsFromSamples(sum, BATTERY_SAMPLE_COUNT);
+#else
+  return 0;
+#endif
+}
+
+void invalidateBatteryWarningFrame() {
+  displayHasKnownFrame = false;
+  homeSnapshotValid = false;
+  partialRefreshCount = 0;
+  displayDirty = true;
+}
+
+void updateBatteryMonitor(unsigned long now) {
+  if (batteryUsbPresent()) {
+    batteryUsbWasPresent = true;
+    return;  // Do not re-arm warnings from a USB supply voltage.
+  }
+  if (batteryUsbWasPresent) {
+    batteryUsbWasPresent = false;
+    batteryWaitingAfterUsb = true;
+    lastBatteryCheck = now;
+    return;
+  }
+  if (batteryWaitingAfterUsb) {
+    if (now - lastBatteryCheck < BATTERY_UNPLUG_SETTLE_MS) return;
+    batteryWaitingAfterUsb = false;
+  } else if (batteryCheckStarted && now - lastBatteryCheck < BATTERY_CHECK_MS) {
+    return;
+  }
+  batteryCheckStarted = true;
+  lastBatteryCheck = now;
+  byte warning = batteryAlerts.observe(readBatteryMillivolts());
+  if (!warning || (batteryWarningPercent && warning >= batteryWarningPercent)) return;
+  batteryWarningPercent = warning;
+  batteryWarningNeedsRefresh = true;
+  batteryWaitForRelease = true;
+  sleepSelectHeldSince = 0;
+  invalidateBatteryWarningFrame();
+}
+
+bool handleBatteryWarningInput(bool anyPress) {
+  if (!batteryWarningPercent && !batteryWaitForRelease) return false;
+  sleepSelectHeldSince = 0;
+  if (batteryWaitForRelease) {
+    // Also wait for debounced release, so a held/bouncing key cannot leak through.
+    if (!anyButtonHeld() && leftButton.stable == HIGH && selectButton.stable == HIGH &&
+        rightButton.stable == HIGH && muteButton.stable == HIGH) {
+      batteryWaitForRelease = false;
+    }
+    return true;
+  }
+  if (anyPress) {
+    batteryWarningPercent = 0;
+    batteryWarningNeedsRefresh = false;
+    batteryWaitForRelease = true;
+    invalidateBatteryWarningFrame();
+  }
+  return true;
+}
+
 bool activeWindowOpen(unsigned long now) {
   return now - lastUserActivity < ACTIVE_WINDOW_MS;
 }
@@ -542,47 +642,49 @@ void markUserActivity(unsigned long now) {
   lowPowerCycleSaved = false;
 }
 
-bool overnightSleepActive() {
-  return forcedSleepMinutesLeft > 0 && pet.sleeping &&
-         screen == ACTION_SCENE && sceneAction == OVERNIGHT;
+bool deepSleepActive() {
+  return deepSleepAwaitingWake && pet.sleeping;
 }
 
 bool hospitalBlockedByDeepSleep() {
-  return forcedSleepMinutesLeft > 0 || postDeepSleepHospitalGraceMinutes > 0;
+  return deepSleepAwaitingWake || postDeepSleepHospitalGraceMinutes > 0;
 }
 
-void finishForcedSleep() {
-  bool wasOvernightScene = screen == ACTION_SCENE && sceneAction == OVERNIGHT;
-  forcedSleepMinutesLeft = 0;
+void wakeFromDeepSleep() {
+  deepSleepAwaitingWake = false;
   postDeepSleepHospitalGraceMinutes = POST_DEEP_SLEEP_HOSPITAL_GRACE_MINUTES;
-  overnightSelectHeldSince = 0;
+  sleepSelectHeldSince = 0;
   pet.sleeping = false;
   makeVeryHungry();
   updateLowStatusAlerts(true);
-  if (wasOvernightScene) screen = HOME;
+  screen = HOME;
+  // Consume the hold, including when waking immediately after a restart.
+  selectButton.stable = LOW;
+  selectButton.last = LOW;
+  selectButton.changedAt = millis();
   lowPowerCycleSaved = false;
   saveGame(HOME);
   displayDirty = true;
 }
 
-bool updateOvernightSelectWake(unsigned long now) {
-  if (!overnightSleepActive()) {
-    overnightSelectHeldSince = 0;
+bool updateSleepSelectWake(unsigned long now) {
+  if (!deepSleepActive()) {
+    sleepSelectHeldSince = 0;
     return false;
   }
   if (digitalRead(SELECT_PIN) != LOW) {
-    overnightSelectHeldSince = 0;
+    sleepSelectHeldSince = 0;
     return false;
   }
-  if (overnightSelectHeldSince == 0) overnightSelectHeldSince = now;
-  if (now - overnightSelectHeldSince < SELECT_HOLD_WAKE_MS) return false;
-  finishForcedSleep();
+  if (sleepSelectHeldSince == 0) sleepSelectHeldSince = now;
+  if (now - sleepSelectHeldSince < SELECT_HOLD_WAKE_MS) return false;
+  wakeFromDeepSleep();
   return true;
 }
 
 bool shouldSaveBeforeLowPower() {
   return screen == EGG || screen == HOME || screen == GROWN_UP || screen == HOSPITAL ||
-         overnightSleepActive();
+         deepSleepActive();
 }
 
 #if defined(ARDUINO_ARCH_NRF52)
@@ -716,13 +818,14 @@ void applyLowPowerElapsed(unsigned long beforeSleep, unsigned long wokeAt) {
   lastNeedsTick -= missingMs;
   lastEggFrame -= missingMs;
   lastIdleAnimation -= missingMs;
+  lastBatteryCheck -= missingMs;
 #endif
 }
 
 void enterLowPowerCycle(unsigned long now) {
-  bool overnightSceneCanSleep = overnightSleepActive();
+  bool sleepingSceneCanSleep = deepSleepActive();
   if (activeWindowOpen(now) || displayDirty ||
-      (screen == ACTION_SCENE && !overnightSceneCanSleep) ||
+      (screen == ACTION_SCENE && !sleepingSceneCanSleep) ||
       screen == HATCHING) return;
 
   if (!lowPowerCycleSaved && shouldSaveBeforeLowPower()) {
@@ -896,8 +999,7 @@ bool applyLoadedSaveData(const SaveData &data) {
 
   languageChoice = data.language < 3 ? data.language : 0;
   hatchMinutesLeft = data.hatchMinutesLeft;
-  forcedSleepMinutesLeft = saveVersion >= 2 &&
-      data.forcedSleepMinutesLeft <= FORCED_SLEEP_MINUTES ? data.forcedSleepMinutesLeft : 0;
+  deepSleepAwaitingWake = saveVersion >= 2 && data.deepSleepAwaitingWake != 0;
   awayHungerMinutes = saveVersion >= 4 && data.awayHungerMinutes <= AWAY_HUNGER_MINUTES ?
       data.awayHungerMinutes : 0;
   waterDepleteRemainder = saveVersion >= 5 && data.waterDepleteRemainder < WATER_DRAIN_DENOMINATOR ?
@@ -927,17 +1029,21 @@ bool applyLoadedSaveData(const SaveData &data) {
     screen = HOSPITAL;
     if (hospitalMinutesLeft == 0) hospitalMinutesLeft = HOSPITAL_MINUTES;
   }
-  else if (data.stage == GROWN_UP || pet.ageDays >= PET_ADULT_DAYS) screen = GROWN_UP;
+  else if (data.stage == GROWN_UP ||
+           (pet.ageDays >= PET_ADULT_DAYS && !deepSleepAwaitingWake)) screen = GROWN_UP;
   else screen = HOME;
 
   if (screen == EGG || screen == GROWN_UP || screen == HOSPITAL) {
-    forcedSleepMinutesLeft = 0;
+    deepSleepAwaitingWake = false;
     postDeepSleepHospitalGraceMinutes = 0;
   }
-  else if (forcedSleepMinutesLeft > 0 || pet.energy == 0) {
-    if (forcedSleepMinutesLeft == 0) forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
+  else if (deepSleepAwaitingWake || pet.energy == 0) {
+    deepSleepAwaitingWake = true;
     pet.sleeping = true;
     postDeepSleepHospitalGraceMinutes = 0;
+    sceneAction = OVERNIGHT;
+    sceneFrame = 3;
+    screen = ACTION_SCENE;
   }
 
   return true;
@@ -964,7 +1070,7 @@ void toggleSoundMute() {
 void saveGame(byte stage) {
   SaveData data = {
     SAVE_MAGIC, gameClock, pet, (byte)animal, stage, hatchMinutesLeft,
-    languageChoice, SAVE_VERSION, forcedSleepMinutesLeft, awayHungerMinutes,
+    languageChoice, SAVE_VERSION, deepSleepAwaitingWake, awayHungerMinutes,
     waterDepleteRemainder, foodEmptyTicks, waterEmptyTicks, attentionTicks,
     recoveryBonusTicks, hospitalMinutesLeft, virusLevel, (byte)(soundMuted ? 1 : 0),
     currentFirmwareBuildId(), postDeepSleepHospitalGraceMinutes
@@ -1106,6 +1212,9 @@ const __FlashStringHelper *uiText(UiText text) {
       case TXT_DAYS_OLD: return F("TAGE ALT");
       case TXT_WEIGHT: return F("GEWICHT");
       case TXT_KG: return F("KG");
+      case TXT_BATTERY: return F("AKKU");
+      case TXT_PLEASE_CHARGE: return F("BITTE LADEN");
+      case TXT_PRESS_ANY_BUTTON: return F("BELIEBIGE TASTE");
     }
   }
 
@@ -1160,6 +1269,9 @@ const __FlashStringHelper *uiText(UiText text) {
     case TXT_DAYS_OLD: return F("DAYS OLD");
     case TXT_WEIGHT: return F("WEIGHT");
     case TXT_KG: return F("KG");
+    case TXT_BATTERY: return F("BATTERY");
+    case TXT_PLEASE_CHARGE: return F("PLEASE CHARGE");
+    case TXT_PRESS_ANY_BUTTON: return F("PRESS ANY BUTTON");
   }
   return F("");
 }
@@ -1216,6 +1328,9 @@ const char *bgText(UiText text) {
     case TXT_DAYS_OLD: return "ДНИ";
     case TXT_WEIGHT: return "ТЕГЛО";
     case TXT_KG: return "КГ";
+    case TXT_BATTERY: return "БАТЕРИЯ";
+    case TXT_PLEASE_CHARGE: return "МОЛЯ, ЗАРЕДИ";
+    case TXT_PRESS_ANY_BUTTON: return "НАТИСНИ БУТОН";
   }
   return "";
 }
@@ -2285,7 +2400,33 @@ void noteDisplayRefresh(bool partial) {
   displayDirty = false;
 }
 
+void drawBatteryWarning() {
+  display.setTextColor(GxEPD_BLACK);
+  drawUiCentered(TXT_BATTERY, 28, 2);
+  drawCentered(batteryWarningPercent == 20 ? F("20%") : F("40%"), 72, 4);
+  if (batteryWarningPercent == 20) drawUiCentered(TXT_PLEASE_CHARGE, 128, 2);
+  drawUiCentered(TXT_PRESS_ANY_BUTTON, 176, 1);
+}
+
 void refreshDisplay() {
+  if (batteryWarningPercent) {
+    if (batteryWarningNeedsRefresh) {
+      platformPeripheralPowerOn();
+      display.setFullWindow();
+      display.firstPage();
+      do {
+        display.fillScreen(GxEPD_WHITE);
+        drawBatteryWarning();
+      } while (display.nextPage());
+      batteryWarningNeedsRefresh = false;
+    }
+    // Gameplay continues underneath; avoid re-drawing this static alert each tick.
+    displayHasKnownFrame = false;
+    homeSnapshotValid = false;
+    partialRefreshCount = 0;
+    displayDirty = false;
+    return;
+  }
   if (canUseHomeStatusPartialRefresh()) {
     refreshHomeStatusPartial();
     return;
@@ -2324,6 +2465,10 @@ void drawHatchingFrame(byte frame) {
 }
 
 void refreshHatchingFrame(byte frame) {
+  if (batteryWarningPercent) {
+    refreshDisplay();
+    return;
+  }
   platformPeripheralPowerOn();
   bool partial = EPD_PARTIAL_REFRESH_ENABLED &&
                  displayHasKnownFrame &&
@@ -2354,7 +2499,13 @@ void animateAction(Action action) {
   }
   sceneFrame = 3;
   delay(1000);
-  if (action == OVERNIGHT) {
+  if (deepSleepActive()) {
+    // An action can exhaust the pet, so finish on the sleep scene in either case.
+    if (sceneAction != OVERNIGHT) {
+      sceneAction = OVERNIGHT;
+      displayDirty = true;
+      refreshDisplay();
+    }
     saveGame(HOME);
     displayDirty = false;
     return;
@@ -2382,7 +2533,9 @@ void startEgg() {
   virusLevel = 0;
   lowStatusAlertMask = currentLowStatusMask();
   lowStatusFlashOn = false;
-  forcedSleepMinutesLeft = 0;
+  deepSleepAwaitingWake = false;
+  postDeepSleepHospitalGraceMinutes = 0;
+  sleepSelectHeldSince = 0;
   hospitalMinutesLeft = 0;
   resetAwayHungerTimer();
   waterDepleteRemainder = 0;
@@ -2400,7 +2553,7 @@ void startEgg() {
 void enterGrownUpScreen() {
   if (pet.ageDays < PET_ADULT_DAYS) pet.ageDays = PET_ADULT_DAYS;
   pet.sleeping = false;
-  forcedSleepMinutesLeft = 0;
+  deepSleepAwaitingWake = false;
   hospitalMinutesLeft = 0;
   resetAwayHungerTimer();
   resetEmptyNeedTimers();
@@ -2413,7 +2566,8 @@ void enterGrownUpScreen() {
 }
 
 void checkAgeLimit() {
-  if (screen != EGG && screen != GROWN_UP && screen != HOSPITAL && pet.ageDays >= PET_ADULT_DAYS) {
+  if (!deepSleepActive() && screen != EGG && screen != GROWN_UP &&
+      screen != HOSPITAL && pet.ageDays >= PET_ADULT_DAYS) {
     enterGrownUpScreen();
   }
 }
@@ -2661,11 +2815,13 @@ void updateEmptyNeedSurvival() {
 
 void startForcedSleep() {
   if (screen == EGG || screen == GROWN_UP || screen == HOSPITAL) return;
-  forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
+  deepSleepAwaitingWake = true;
   postDeepSleepHospitalGraceMinutes = 0;
-  overnightSelectHeldSince = 0;
+  sleepSelectHeldSince = 0;
   pet.sleeping = true;
-  screen = HOME;
+  sceneAction = OVERNIGHT;
+  sceneFrame = 3;
+  screen = ACTION_SCENE;
   resetAwayHungerTimer();
   saveGame(HOME);
   displayDirty = true;
@@ -2684,9 +2840,9 @@ void recoverFromHospital() {
   pet.sick = false;
   virusLevel = 0;
   pet.sleeping = false;
-  forcedSleepMinutesLeft = 0;
+  deepSleepAwaitingWake = false;
   postDeepSleepHospitalGraceMinutes = 0;
-  overnightSelectHeldSince = 0;
+  sleepSelectHeldSince = 0;
   waterDepleteRemainder = 0;
   resetAwayHungerTimer();
   resetEmptyNeedTimers();
@@ -2707,7 +2863,7 @@ void enterHospital() {
   pet.health = 0;
   pet.happy = 0;
   pet.sleeping = false;
-  forcedSleepMinutesLeft = 0;
+  deepSleepAwaitingWake = false;
   resetAwayHungerTimer();
   resetRecoveryBonus();
   screen = HOSPITAL;
@@ -2762,13 +2918,6 @@ void advanceClock() {
   } else {
     if (postDeepSleepHospitalGraceMinutes > 0) postDeepSleepHospitalGraceMinutes--;
     updateAwayHunger();
-    if (forcedSleepMinutesLeft > 0) {
-      forcedSleepMinutesLeft--;
-      pet.sleeping = true;
-      if (forcedSleepMinutesLeft == 0) {
-        finishForcedSleep();
-      }
-    }
   }
   gameClock.minute++;
   if (gameClock.minute < 60) return;
@@ -2919,14 +3068,14 @@ void performAction(Action action) {
       applyEmptyNeedMood();
       break;
     case SLEEP:
-      if (forcedSleepMinutesLeft == 0) pet.sleeping = !pet.sleeping;
+      if (!deepSleepAwaitingWake) pet.sleeping = !pet.sleeping;
       else pet.sleeping = true;
       pet.energy = clampStat(pet.energy + 8);
       break;
     case OVERNIGHT:
-      forcedSleepMinutesLeft = FORCED_SLEEP_MINUTES;
+      deepSleepAwaitingWake = true;
       postDeepSleepHospitalGraceMinutes = 0;
-      overnightSelectHeldSince = 0;
+      sleepSelectHeldSince = 0;
       pet.sleeping = true;
       pet.energy = 100;
       makeVeryHungry();
@@ -2975,6 +3124,8 @@ void changeSetupValue(int direction) {
 
 void handleButtons(bool left, bool select, bool right) {
   if (left || select || right) resetAwayHungerTimer();
+  // updateSleepSelectWake handles the only gameplay input allowed in deep sleep.
+  if (deepSleepActive()) return;
   if (screen == LOVE_MESSAGE) {
     if (left || select || right) dismissLoveMessage();
     return;
@@ -3099,6 +3250,7 @@ void setup() {
   Serial.begin(9600);
   Serial.println(F("Tamagotchi nRF52840 e-paper boot"));
   randomSeed(analogRead(A0));
+  initBatteryMonitor();
 #if defined(ESP32) || defined(ARDUINO_ARCH_NRF52)
   EEPROM.begin(EEPROM_STORAGE_BYTES);
 #endif
@@ -3121,32 +3273,36 @@ void setup() {
   lowStatusFlashOn = false;
   lowPowerCycleSaved = false;
   eggSelectCount = 0;
+  updateBatteryMonitor(bootNow);
   refreshDisplay();
 }
 
 void loop() {
   unsigned long now = millis();
   if (anyButtonHeld()) markUserActivity(now);
-  if (updateOvernightSelectWake(now)) {
-    if (displayDirty) refreshDisplay();
-    return;
-  }
+  updateBatteryMonitor(now);
 
   bool left = pressed(leftButton);
   bool select = pressed(selectButton);
   bool right = pressed(rightButton);
   bool mute = pressed(muteButton);
-  if (mute) {
-    resetAwayHungerTimer();
-    if (screen == HOSPITAL) {
-      handleHospitalMuteShortcut();
-    } else {
-      hospitalMuteExitCount = 0;
-      if (screen == LOVE_MESSAGE) dismissLoveMessage();
-      toggleSoundMute();
+  if (!handleBatteryWarningInput(left || select || right || mute)) {
+    if (updateSleepSelectWake(now)) {
+      if (displayDirty) refreshDisplay();
+      return;
     }
+    if (mute) {
+      resetAwayHungerTimer();
+      if (screen == HOSPITAL) {
+        handleHospitalMuteShortcut();
+      } else {
+        hospitalMuteExitCount = 0;
+        if (screen == LOVE_MESSAGE) dismissLoveMessage();
+        toggleSoundMute();
+      }
+    }
+    if (left || select || right) handleButtons(left, select, right);
   }
-  if (left || select || right) handleButtons(left, select, right);
   if (left || select || right || mute) markUserActivity(millis());
 
   now = millis();
